@@ -11,6 +11,8 @@
     "sync": "bun run src/index.ts sync",
     "stats": "bun run src/index.ts stats",
     "mcp": "bun run mcp-server/index.ts",
+    "sync-to-cloud": "bun src/sync-to-cloud.ts",
+    "test-cloud": "bun src/test-cloud.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
