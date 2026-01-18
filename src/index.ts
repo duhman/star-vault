@@ -5,227 +5,75 @@
  */
 
 import { config } from "dotenv";
-config({ override: true }); // Override shell env vars with .env values
-import { fetchAllStarredRepos } from "./github/starred.js";
-import { getGitHubClient } from "./github/client.js";
-import { fetchReadme, fetchPackageJson } from "./github/content.js";
-import {
-  upsertRepos,
-  getReposNeedingContent,
-  getReposNeedingEmbeddings,
-  updateRepoContent,
-  updateRepoEmbedding,
-  recordSyncState,
-} from "./process/repos.js";
-import { generateRepoEmbedding } from "./process/embeddings.js";
-import pLimit from "p-limit";
+import { getStats, syncStarVault } from "./utils/convex.js";
+
+config({ override: true });
 
 async function importStarredRepos(): Promise<void> {
-  console.log("📦 Fetching starred repositories...\n");
+  console.log("📦 Syncing starred repositories...\n");
+  const result = await syncStarVault({
+    fetchRepos: true,
+    contentLimit: 0,
+    embeddingLimit: 0,
+    syncType: "import",
+  });
 
-  const client = getGitHubClient();
-  const rateLimit = await client.getRateLimit();
   console.log(
-    `Rate limit: ${rateLimit.remaining}/${rateLimit.limit} (resets ${rateLimit.reset.toLocaleTimeString()})\n`,
+    `✅ Fetched ${result.repos_fetched} repos (added ${result.repos_added}, updated ${result.repos_updated})\n`,
   );
-
-  const repos = await fetchAllStarredRepos({
-    onProgress: (fetched) => {
-      process.stdout.write(`\r   Fetched: ${fetched} repos`);
-    },
-  });
-  console.log(`\n\n✅ Fetched ${repos.length} starred repositories\n`);
-
-  console.log("💾 Storing in database...");
-  const { added, updated } = await upsertRepos(repos);
-  console.log(`   Added: ${added}, Updated: ${updated}\n`);
-
-  await recordSyncState({
-    repos_added: added,
-    repos_updated: updated,
-    sync_type: "import",
-    metadata: { total_repos: repos.length },
-  });
-  console.log("✅ Import complete!\n");
 }
 
 async function fetchContent(): Promise<void> {
-  console.log("📖 Fetching README and package.json for repos...\n");
+  console.log("📖 Fetching README/package.json content...\n");
+  const result = await syncStarVault({
+    fetchRepos: false,
+    contentLimit: 50,
+    embeddingLimit: 0,
+    syncType: "content",
+  });
 
-  // Fetch in batches
-  let totalProcessed = 0;
-  let totalErrors = 0;
-
-  while (true) {
-    const repos = await getReposNeedingContent(50);
-
-    if (repos.length === 0) {
-      break;
-    }
-
-    console.log(`   Batch: ${repos.length} repos to process`);
-
-    const limit = pLimit(5); // 5 concurrent requests
-
-    const tasks = repos.map((repo) =>
-      limit(async () => {
-        try {
-          const [readme, packageJson] = await Promise.all([
-            fetchReadme(repo.owner, repo.name, repo.default_branch),
-            fetchPackageJson(repo.owner, repo.name, repo.default_branch),
-          ]);
-
-          await updateRepoContent(repo.id, readme, packageJson);
-          totalProcessed++;
-
-          if (totalProcessed % 25 === 0) {
-            console.log(`   Progress: ${totalProcessed} processed`);
-          }
-        } catch (error) {
-          totalErrors++;
-          console.error(
-            `   ⚠️  Error fetching content for ${repo.full_name}: ${error}`,
-          );
-        }
-      }),
-    );
-
-    await Promise.all(tasks);
-  }
-
-  if (totalProcessed === 0 && totalErrors === 0) {
-    console.log("✅ All repos already have content fetched!\n");
-  } else {
-    await recordSyncState({
-      content_fetched: totalProcessed,
-      sync_type: "content",
-    });
-    console.log(
-      `\n✅ Content fetch complete! Processed: ${totalProcessed}, Errors: ${totalErrors}\n`,
-    );
-  }
+  console.log(`✅ Content fetched: ${result.content_fetched}\n`);
 }
 
 async function processEmbeddings(): Promise<void> {
-  console.log("🧠 Generating embeddings for repos...\n");
+  console.log("🧠 Generating embeddings...\n");
+  const result = await syncStarVault({
+    fetchRepos: false,
+    contentLimit: 0,
+    embeddingLimit: 20,
+    syncType: "embeddings",
+  });
 
-  // Fetch in batches
-  let totalProcessed = 0;
-  let totalErrors = 0;
-
-  while (true) {
-    const repos = await getReposNeedingEmbeddings(20);
-
-    if (repos.length === 0) {
-      break;
-    }
-
-    console.log(`   Batch: ${repos.length} repos to process`);
-
-    const limit = pLimit(10); // 10 concurrent embedding requests
-
-    const tasks = repos.map((repo) =>
-      limit(async () => {
-        try {
-          const embedding = await generateRepoEmbedding(repo);
-          await updateRepoEmbedding(repo.id, embedding);
-          totalProcessed++;
-
-          if (totalProcessed % 10 === 0) {
-            console.log(`   Progress: ${totalProcessed} processed`);
-          }
-        } catch (error) {
-          totalErrors++;
-          console.error(
-            `   ⚠️  Error generating embedding for ${repo.full_name}: ${error}`,
-          );
-        }
-      }),
-    );
-
-    await Promise.all(tasks);
-  }
-
-  if (totalProcessed === 0 && totalErrors === 0) {
-    console.log("✅ All repos already have embeddings!\n");
-  } else {
-    await recordSyncState({
-      embeddings_generated: totalProcessed,
-      sync_type: "embeddings",
-    });
-    console.log(
-      `\n✅ Embedding generation complete! Processed: ${totalProcessed}, Errors: ${totalErrors}\n`,
-    );
-  }
+  console.log(`✅ Embeddings generated: ${result.embeddings_generated}\n`);
 }
 
 async function fullSync(): Promise<void> {
   console.log("🔄 Running full sync...\n");
-  console.log("═".repeat(50));
+  const result = await syncStarVault({
+    fetchRepos: true,
+    contentLimit: 50,
+    embeddingLimit: 20,
+    syncType: "manual",
+  });
 
-  await importStarredRepos();
-  console.log("─".repeat(50));
-
-  await fetchContent();
-  console.log("─".repeat(50));
-
-  await processEmbeddings();
-  console.log("═".repeat(50));
-
-  console.log("\n🎉 Full sync complete!\n");
+  console.log(
+    `✅ Sync complete (added ${result.repos_added}, updated ${result.repos_updated}, content ${result.content_fetched}, embeddings ${result.embeddings_generated})\n`,
+  );
 }
 
 async function showStats(): Promise<void> {
-  const { supabase } = await import("./utils/supabase.js");
-
-  // Get repo counts
-  const { count: totalRepos } = await supabase
-    .from("sv_repos")
-    .select("*", { count: "exact", head: true });
-
-  const { count: withEmbeddings } = await supabase
-    .from("sv_repos")
-    .select("*", { count: "exact", head: true })
-    .not("embedding", "is", null);
-
-  const { count: withReadme } = await supabase
-    .from("sv_repos")
-    .select("*", { count: "exact", head: true })
-    .not("readme_content", "is", null);
-
-  // Get top languages
-  const { data: langs } = await supabase
-    .from("sv_repos")
-    .select("language")
-    .not("language", "is", null);
-
-  const langCounts: Record<string, number> = {};
-  for (const row of langs || []) {
-    if (row.language) {
-      langCounts[row.language] = (langCounts[row.language] || 0) + 1;
-    }
-  }
-  const topLanguages = Object.entries(langCounts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5)
-    .map(([lang, count]) => `${lang} (${count})`);
-
-  // Get last sync
-  const { data: lastSync } = await supabase
-    .from("sv_sync_state")
-    .select("last_sync_at")
-    .order("last_sync_at", { ascending: false })
-    .limit(1)
-    .single();
+  const stats = await getStats();
 
   console.log("\n📊 Star Vault Statistics\n");
   console.log("═".repeat(40));
-  console.log(`Total repos:        ${totalRepos ?? 0}`);
-  console.log(`With embeddings:    ${withEmbeddings ?? 0}`);
-  console.log(`With README:        ${withReadme ?? 0}`);
-  console.log(`Top languages:      ${topLanguages.join(", ") || "N/A"}`);
+  console.log(`Total repos:        ${stats.total_repos ?? 0}`);
+  console.log(`With embeddings:    ${stats.with_embeddings ?? 0}`);
+  console.log(`With README:        ${stats.with_readme ?? 0}`);
   console.log(
-    `Last synced:        ${lastSync?.last_sync_at ? new Date(lastSync.last_sync_at).toLocaleString() : "Never"}`,
+    `Top languages:      ${stats.top_languages?.slice(0, 5).join(", ") || "N/A"}`,
+  );
+  console.log(
+    `Last synced:        ${stats.last_sync ? new Date(stats.last_sync).toLocaleString() : "Never"}`,
   );
   console.log("═".repeat(40) + "\n");
 }
@@ -254,10 +102,10 @@ switch (command) {
 Star Vault CLI - GitHub Starred Repos Intelligence
 
 Usage:
-  npm run import         Fetch and store starred repos from GitHub
-  npm run fetch-content  Fetch README and package.json for all repos
-  npm run embeddings     Generate embeddings for all repos
-  npm run sync           Run full sync (import + content + embeddings)
+  npm run import         Fetch starred repos from GitHub (Convex)
+  npm run fetch-content  Fetch README/package.json content (Convex)
+  npm run embeddings     Generate embeddings (Convex)
+  npm run sync           Run full sync (Convex)
   npm run stats          Show database statistics
 `);
 }

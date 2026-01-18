@@ -2,15 +2,14 @@
 
 Capture GitHub starred repositories, extract content, generate embeddings, and make them searchable via semantic search.
 
-## Status: ✅ Operational
+## Status: ✅ Operational (Convex)
 
 | Metric               | Value                         |
 | -------------------- | ----------------------------- |
-| Repos imported       | 638                           |
-| README content       | 630 (98.7%)                   |
-| Embeddings generated | 638 (100%)                    |
-| Daily sync           | ✅ Cron job active (7 AM UTC) |
-| Edge Function        | ✅ Deployed                   |
+| Repos imported       | 652                           |
+| README content       | 652 (100%)                    |
+| Embeddings generated | 652 (100%)                    |
+| Daily sync           | ✅ Convex cron (7 AM UTC)     |
 | MCP Server           | ✅ Ready to use               |
 
 ## Quick Start
@@ -34,25 +33,25 @@ bun run embeddings      # Generate embeddings
 ## Architecture
 
 ```
-GitHub API → Fetch Repos → Fetch Content → Generate Embeddings → Supabase (pgvector)
+GitHub API → Fetch Repos → Fetch Content → Generate Embeddings → Convex
                                                                         ↓
                                                                   MCP Server → Claude
 ```
 
 ## Database
 
-Uses self-hosted Supabase at `srv1209224.hstgr.cloud`
+Uses Convex deployment `https://utmost-gerbil-770.convex.cloud`
 
 | Table           | Purpose                             |
 | --------------- | ----------------------------------- |
 | `sv_repos`      | Starred repos with 1536d embeddings |
 | `sv_sync_state` | Sync history and stats              |
 
-### Key Functions
+### Key Functions (Convex)
 
-- `sv_search_repos(embedding, threshold, limit)` - Semantic repo search
-- `sv_get_repo_details(full_name)` - Get repo by owner/name
-- `sv_get_stats()` - Vault statistics
+- `starVaultQueries.searchRepos` - Semantic repo search
+- `starVaultQueries.getRepoDetails` - Get repo by owner/name
+- `starVaultQueries.getStats` - Vault statistics
 
 ## MCP Server
 
@@ -82,9 +81,7 @@ Add to `~/.mcp.json`:
         "/Users/bigmac/projects/personal/star-vault/mcp-server/index.ts"
       ],
       "env": {
-        "SUPABASE_URL": "${SUPABASE_SELFHOSTED_URL}",
-        "SUPABASE_SERVICE_ROLE_KEY": "${SUPABASE_SELFHOSTED_SERVICE_KEY}",
-        "OPENAI_API_KEY": "${OPENAI_API_KEY}"
+        "CONVEX_URL": "https://utmost-gerbil-770.convex.cloud"
       }
     }
   }
@@ -94,9 +91,9 @@ Add to `~/.mcp.json`:
 ## Tech Stack
 
 - **Runtime**: Bun 1.2+, TypeScript 5.7
-- **Database**: Supabase (PostgreSQL + pgvector)
-- **Embeddings**: OpenAI text-embedding-3-small (1536d)
-- **Vector Index**: HNSW (m=16, ef_construction=64)
+- **Database**: Convex
+- **Embeddings**: OpenAI text-embedding-3-small (1536d) in Convex
+- **Vector Index**: Convex vector index
 - **Validation**: Zod
 - **MCP**: @modelcontextprotocol/sdk
 
@@ -104,9 +101,9 @@ Add to `~/.mcp.json`:
 
 | Variable                    | Required | Description                   |
 | --------------------------- | -------- | ----------------------------- |
-| `SUPABASE_URL`              | Yes      | Self-hosted Supabase URL      |
-| `SUPABASE_SERVICE_ROLE_KEY` | Yes      | Service role key              |
-| `OPENAI_API_KEY`            | Yes      | OpenAI API key for embeddings |
+| `CONVEX_URL`                | Yes      | Convex deployment URL         |
+| `CONVEX_DEPLOY_KEY`         | No       | Convex CLI deploy/run access  |
+| `OPENAI_API_KEY`            | No       | Set in Convex env for embeddings |
 | `GITHUB_TOKEN`              | Yes      | GitHub PAT for API access     |
 
 ## Commands
@@ -123,54 +120,6 @@ Add to `~/.mcp.json`:
 
 ## Daily Sync (Automated)
 
-The daily sync runs at **7 AM UTC** via pg_cron, after tweet-vault (6 AM).
-
-### Architecture
-
-```
-pg_cron (7 AM) → trigger_star_vault_sync() → pg_net HTTP POST → Edge Function
-                                                                      ↓
-                                                              GitHub API fetch
-                                                              Content fetch
-                                                              Embedding generation
-                                                              Database upsert
-```
-
-### Deploy Edge Function
-
-For self-hosted Supabase, deploy manually via SSH:
-
-```bash
-# Option 1: Use deploy script
-chmod +x scripts/deploy-edge-function.sh
-./scripts/deploy-edge-function.sh
-
-# Option 2: Manual deployment
-scp -r supabase/functions/star-vault-sync root@srv1209224.hstgr.cloud:/root/supabase/volumes/functions/
-ssh root@srv1209224.hstgr.cloud "cd /root/supabase && docker compose restart functions"
-```
-
-### Configure Secrets
-
-Add to `/root/supabase/.env` on the server:
-
-```bash
-# Star Vault secrets
-GITHUB_TOKEN=github_pat_...
-OPENAI_API_KEY=sk-proj-...
-```
-
-Then restart functions: `docker compose restart functions`
-
-### Verify Cron Job
-
-```sql
--- Check job status
-SELECT jobname, schedule, active FROM cron.job WHERE jobname = 'star-vault-daily-sync';
-
--- Check recent runs
-SELECT * FROM cron.job_run_details WHERE jobid = 10 ORDER BY start_time DESC LIMIT 5;
-
--- Manual trigger
-SELECT public.trigger_star_vault_sync();
-```
+The daily sync runs at **7 AM UTC** via Convex cron in
+`/Users/bigmac/projects/personal/self-host/convex/crons.ts`, calling
+`starVault.syncStarVault`.

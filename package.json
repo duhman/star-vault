@@ -11,16 +11,12 @@
     "sync": "bun run src/index.ts sync",
     "stats": "bun run src/index.ts stats",
     "mcp": "bun run mcp-server/index.ts",
-    "sync-to-cloud": "bun src/sync-to-cloud.ts",
-    "test-cloud": "bun src/test-cloud.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "@supabase/supabase-js": "^2.47.0",
+    "convex": "^1.16.2",
     "dotenv": "^17.2.3",
-    "openai": "^4.77.0",
-    "p-limit": "^6.2.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {

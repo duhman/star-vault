@@ -13,6 +13,6 @@
     "outDir": "./dist",
     "rootDir": "."
   },
-  "include": ["src/**/*", "mcp-server/**/*", "scripts/**/*"],
+  "include": ["src/**/*", "mcp-server/**/*", "scripts/**/*", "types/**/*"],
   "exclude": ["node_modules", "dist"]
 }

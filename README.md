@@ -9,14 +9,14 @@ Ever starred hundreds of repos and forgot what's in there? Star Vault makes your
 - 🔍 **Semantic Search** — Find repos by description, not just keywords
 - 📚 **README Extraction** — Captures full README content for better context
 - 🤖 **Claude MCP Integration** — Query your stars directly from Claude
-- ⏰ **Daily Sync** — Automatically captures new stars via pg_cron
+- ⏰ **Daily Sync** — Automatically captures new stars via Convex cron
 - 🧠 **Smart Embeddings** — OpenAI text-embedding-3-small (1536 dimensions)
-- ⚡ **Fast Vector Search** — PostgreSQL pgvector with HNSW indexing
+- ⚡ **Fast Vector Search** — Convex vector index
 
 ## Architecture
 
 ```
-GitHub API → Fetch Repos → Extract README → Generate Embeddings → Supabase (pgvector)
+GitHub API → Fetch Repos → Extract README → Generate Embeddings → Convex
                                                                         ↓
                                                                   MCP Server → Claude
 ```
@@ -26,9 +26,9 @@ GitHub API → Fetch Repos → Extract README → Generate Embeddings → Supaba
 ### Prerequisites
 
 - [Bun](https://bun.sh) 1.2+
-- [Supabase](https://supabase.com) instance (cloud or self-hosted)
-- [OpenAI API key](https://platform.openai.com/api-keys)
-- [GitHub Personal Access Token](https://github.com/settings/tokens)
+- [Convex](https://docs.convex.dev) deployment (self-host project)
+- [OpenAI API key](https://platform.openai.com/api-keys) (set in Convex env)
+- [GitHub Personal Access Token](https://github.com/settings/tokens) (set in Convex env)
 
 ### Installation
 
@@ -47,12 +47,12 @@ cp .env.example .env
 
 ### Database Setup
 
-Run the migrations in your Supabase SQL editor:
+Convex schema and cron jobs live in `/Users/bigmac/projects/personal/self-host/convex/`.
+Deploy with:
 
 ```bash
-# Apply migrations in order
-cat supabase/migrations/001_initial_schema.sql
-cat supabase/migrations/002_move_to_public_schema.sql
+cd /Users/bigmac/projects/personal/self-host
+CONVEX_DEPLOY_KEY="$(cat .convex-deploy-key)" npx convex deploy
 ```
 
 ### Import Your Stars
@@ -78,9 +78,7 @@ Add to your Claude MCP configuration (`~/.mcp.json` or Claude Desktop settings):
       "command": "bun",
       "args": ["run", "/path/to/star-vault/mcp-server/index.ts"],
       "env": {
-        "SUPABASE_URL": "your-supabase-url",
-        "SUPABASE_SERVICE_ROLE_KEY": "your-service-role-key",
-        "OPENAI_API_KEY": "your-openai-key"
+        "CONVEX_URL": "https://utmost-gerbil-770.convex.cloud"
       }
     }
   }
@@ -120,13 +118,12 @@ Once configured, ask Claude things like:
 
 ## Environment Variables
 
-| Variable                    | Required | Description                             |
-| --------------------------- | -------- | --------------------------------------- |
-| `SUPABASE_URL`              | Yes      | Your Supabase project URL               |
-| `SUPABASE_SERVICE_ROLE_KEY` | Yes      | Service role key (for admin operations) |
-| `SUPABASE_ANON_KEY`         | No       | Anon key (for MCP server)               |
-| `OPENAI_API_KEY`            | Yes      | OpenAI API key for embeddings           |
-| `GITHUB_TOKEN`              | Yes      | GitHub PAT with `repo` scope            |
+| Variable            | Required | Description                     |
+| ------------------- | -------- | ------------------------------- |
+| `CONVEX_URL`        | Yes      | Convex deployment URL           |
+| `CONVEX_DEPLOY_KEY` | No       | Convex CLI deploy/run access    |
+| `OPENAI_API_KEY`    | No       | Set in Convex env for embeddings|
+| `GITHUB_TOKEN`      | No       | Set in Convex env for GitHub API|
 
 ## Database Schema
 
@@ -137,34 +134,24 @@ Once configured, ask Claude things like:
 | `sv_repos`      | Starred repos with metadata and 1536d embeddings |
 | `sv_sync_state` | Sync history and statistics                      |
 
-### Key Functions
+### Key Functions (Convex)
 
-- `sv_search_repos(embedding, threshold, limit)` — Vector similarity search
-- `sv_get_repo_details(full_name)` — Get repo by owner/name
-- `sv_get_stats()` — Vault statistics
+- `starVaultQueries.searchRepos` — Vector similarity search
+- `starVaultQueries.getRepoDetails` — Get repo by owner/name
+- `starVaultQueries.getStats` — Vault statistics
 
 ## Automated Daily Sync
 
-For automated syncing, deploy the Edge Function and configure pg_cron:
-
-```sql
--- Schedule daily sync at 7 AM UTC
-SELECT cron.schedule(
-  'star-vault-daily-sync',
-  '0 7 * * *',
-  $$SELECT trigger_star_vault_sync()$$
-);
-```
-
-See `supabase/functions/star-vault-sync/` for the Edge Function code.
+Automated sync runs via Convex cron in `convex/crons.ts` (7 AM UTC), calling
+`starVault.syncStarVault`.
 
 ## Tech Stack
 
 - **Runtime**: [Bun](https://bun.sh) 1.2+
 - **Language**: TypeScript 5.7
-- **Database**: PostgreSQL + [pgvector](https://github.com/pgvector/pgvector)
+- **Database**: [Convex](https://docs.convex.dev)
 - **Embeddings**: OpenAI text-embedding-3-small (1536d)
-- **Vector Index**: HNSW (m=16, ef_construction=64)
+- **Vector Index**: Convex vector index
 - **Validation**: [Zod](https://zod.dev)
 - **MCP**: [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/sdk)
 
