@@ -1,125 +1,162 @@
-# Star Vault - GitHub Stars Intelligence System
+# CLAUDE.md
 
-Capture GitHub starred repositories, extract content, generate embeddings, and make them searchable via semantic search.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Status: ✅ Operational (Convex)
+## Project Overview
 
-| Metric               | Value                         |
-| -------------------- | ----------------------------- |
-| Repos imported       | 652                           |
-| README content       | 652 (100%)                    |
-| Embeddings generated | 652 (100%)                    |
-| Daily sync           | ✅ Convex cron (7 AM UTC)     |
-| MCP Server           | ✅ Ready to use               |
+GitHub starred repositories intelligence system. Captures starred repos, extracts README content, generates OpenAI embeddings, and enables semantic search via MCP server.
 
-## Quick Start
+| Metric         | Value                  |
+| -------------- | ---------------------- |
+| Repos imported | 652                    |
+| Embeddings     | 652 (100%)             |
+| Daily sync     | Convex cron (7 AM UTC) |
+| MCP Server     | Ready for Claude       |
+
+## Commands
 
 ```bash
-# Install dependencies
-bun install
+# Development
+bun install                    # Install dependencies
+bun run typecheck              # TypeScript checking
 
-# Copy and configure environment
-cp .env.example .env
-# Edit .env with your credentials
+# Convex (backend)
+npx convex dev                 # Start dev server + watch
+npx convex deploy              # Deploy to production
+npx convex env set KEY "val"   # Set environment variable
 
-# Import all starred repos
-bun run import
+# Sync operations (invoke Convex actions)
+bun run import                 # Import starred repos from GitHub
+bun run fetch-content          # Fetch README/package.json (batch 50)
+bun run embeddings             # Generate embeddings (batch 20)
+bun run sync                   # Full sync (all steps)
+bun run stats                  # Show vault statistics
 
-# Or run individual steps
-bun run fetch-content   # Fetch README/package.json
-bun run embeddings      # Generate embeddings
+# MCP Server
+bun run mcp                    # Run standalone for testing
 ```
 
 ## Architecture
 
 ```
-GitHub API → Fetch Repos → Fetch Content → Generate Embeddings → Convex
-                                                                        ↓
-                                                                  MCP Server → Claude
+┌─────────────────────────────────────────────────────────────────┐
+│                         CLI Layer                                │
+│  src/index.ts → src/utils/convex.ts → ConvexHttpClient          │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                      Convex Backend                              │
+│  convex/starVault.ts (actions)    → syncStarVault               │
+│  convex/starVaultQueries.ts       → searchRepos, findSimilar    │
+│  convex/starVaultInternal.ts      → mutations (upsert, update)  │
+│  convex/lib/embeddings.ts         → OpenAI embedding wrapper    │
+│  convex/crons.ts                  → Daily sync at 7 AM UTC      │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                       MCP Server (Supabase)                      │
+│  mcp-server/index.ts → 5 tools → Claude Code integration        │
+│  Database: brawengrbiuvnmsyqhoe.supabase.co (star_vault schema) │
+│  Uses: @supabase/supabase-js, OpenAI embeddings                 │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-## Database
+**Note**: The CLI/sync operations use Convex backend, while the MCP server queries Supabase directly for better performance with Claude Code.
 
-Uses Convex deployment `https://utmost-gerbil-770.convex.cloud`
+### Data Flow
 
-| Table           | Purpose                             |
-| --------------- | ----------------------------------- |
-| `sv_repos`      | Starred repos with 1536d embeddings |
-| `sv_sync_state` | Sync history and stats              |
+1. **Import**: GitHub API → `syncStarVault` action → `sv_repos` table
+2. **Content**: Raw GitHub → README + package.json → stored in repo doc
+3. **Embeddings**: `buildEmbeddingText()` → OpenAI → 1536d vector stored
+4. **Search**: Query → embed → Convex vector search → filter → results
 
-### Key Functions (Convex)
+### Key Patterns
 
-- `starVaultQueries.searchRepos` - Semantic repo search
-- `starVaultQueries.getRepoDetails` - Get repo by owner/name
-- `starVaultQueries.getStats` - Vault statistics
+- **Convex actions** for external API calls (GitHub, OpenAI)
+- **Convex queries** for reads, **internal mutations** for writes
+- **Vector index** on `sv_repos.embedding` for similarity search
+- **Batched processing**: content (50/run), embeddings (20/run)
 
-## MCP Server
+## Database Schema (Convex)
 
-The MCP server exposes these tools to Claude:
+| Table           | Purpose                                    |
+| --------------- | ------------------------------------------ |
+| `sv_repos`      | Starred repos with 1536d embedding vectors |
+| `sv_sync_state` | Sync history and statistics                |
 
-| Tool               | Description                                     |
-| ------------------ | ----------------------------------------------- |
-| `search_repos`     | Semantic search over starred repositories       |
-| `get_repo`         | Get specific repo by full_name with all details |
-| `list_by_language` | Browse repos by programming language            |
-| `list_by_topic`    | Browse repos by topic/tag                       |
-| `find_related`     | Find repos related to a concept or project      |
-| `vault_stats`      | Show vault statistics                           |
-| `recent_stars`     | List recently starred repos                     |
+### sv_repos indexes
 
-### Setup MCP Server
-
-Add to `~/.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "star-vault": {
-      "command": "bun",
-      "args": [
-        "run",
-        "/Users/bigmac/projects/personal/star-vault/mcp-server/index.ts"
-      ],
-      "env": {
-        "CONVEX_URL": "https://utmost-gerbil-770.convex.cloud"
-      }
-    }
-  }
-}
-```
-
-## Tech Stack
-
-- **Runtime**: Bun 1.2+, TypeScript 5.7
-- **Database**: Convex
-- **Embeddings**: OpenAI text-embedding-3-small (1536d) in Convex
-- **Vector Index**: Convex vector index
-- **Validation**: Zod
-- **MCP**: @modelcontextprotocol/sdk
+- `by_github_id` - lookup by GitHub ID
+- `by_embedding` - vector index (1536 dimensions)
 
 ## Environment Variables
 
-| Variable                    | Required | Description                   |
-| --------------------------- | -------- | ----------------------------- |
-| `CONVEX_URL`                | Yes      | Convex deployment URL         |
-| `CONVEX_DEPLOY_KEY`         | No       | Convex CLI deploy/run access  |
-| `OPENAI_API_KEY`            | No       | Set in Convex env for embeddings |
-| `GITHUB_TOKEN`              | Yes      | GitHub PAT for API access     |
+### CLI Operations (.env)
 
-## Commands
+- `CONVEX_URL` - Convex deployment URL (required for sync commands)
 
-| Command                 | Description                               |
-| ----------------------- | ----------------------------------------- |
-| `bun run import`        | Import all starred repos from GitHub      |
-| `bun run fetch-content` | Fetch README/package.json content         |
-| `bun run embeddings`    | Generate pending embeddings               |
-| `bun run sync`          | Full sync (import + content + embeddings) |
-| `bun run stats`         | Show vault statistics                     |
-| `bun run mcp`           | Run MCP server standalone                 |
-| `bun run typecheck`     | Type checking                             |
+### Convex Dashboard
 
-## Daily Sync (Automated)
+- `GITHUB_TOKEN` - GitHub PAT with `repo` scope
+- `OPENAI_API_KEY` - For embeddings
 
-The daily sync runs at **7 AM UTC** via Convex cron in
-`/Users/bigmac/projects/personal/self-host/convex/crons.ts`, calling
-`starVault.syncStarVault`.
+### MCP Server (configured in MCP client configs)
+
+| Variable                     | Value                                      |
+| ---------------------------- | ------------------------------------------ |
+| `SUPABASE_URL`               | `https://brawengrbiuvnmsyqhoe.supabase.co` |
+| `SUPABASE_SERVICE_ROLE_KEY`  | `${PRIVATEBASE_SERVICE_ROLE_KEY}`          |
+| `OPENAI_API_KEY`             | `${OPENAI_API_KEY}`                        |
+| `SUPABASE_SCHEMA` (optional) | `star_vault` (default)                     |
+
+## File Structure
+
+```
+src/
+  index.ts              # CLI entry point
+  utils/
+    convex.ts           # Convex client wrapper
+    convexApi.ts        # Generated API types
+  github/               # (Legacy, now in Convex)
+
+convex/
+  schema.ts             # Database schema
+  starVault.ts          # Main sync action
+  starVaultQueries.ts   # Search/query actions
+  starVaultInternal.ts  # Internal mutations
+  crons.ts              # Daily sync schedule
+  lib/
+    embeddings.ts       # OpenAI embedding helper
+
+mcp-server/
+  index.ts              # MCP server (5 tools)
+```
+
+## MCP Tools
+
+| Tool               | Type   | Description                      |
+| ------------------ | ------ | -------------------------------- |
+| `search_repos`     | action | Semantic search (embeds query)   |
+| `get_repo_details` | query  | Get repo by full_name            |
+| `list_by_language` | query  | Filter by language               |
+| `find_similar`     | action | Find similar repos (uses vector) |
+| `get_stats`        | query  | Vault statistics                 |
+
+## Development Workflow
+
+1. Start Convex dev server: `npx convex dev`
+2. Make changes to `convex/` files (auto-deploys)
+3. Test via CLI: `bun run stats` or `bun run sync`
+4. Type check: `bun run typecheck`
+5. Deploy to prod: `npx convex deploy`
+
+## Embedding Strategy
+
+The `buildEmbeddingText()` function in `convex/starVault.ts` combines:
+
+- Repository full name and description
+- Language, topics, license, star/fork counts
+- First 6000 chars of README
+- Dependency names from package.json
+
+This creates rich searchable text for semantic matching.

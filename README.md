@@ -26,7 +26,7 @@ GitHub API → Fetch Repos → Extract README → Generate Embeddings → Convex
 ### Prerequisites
 
 - [Bun](https://bun.sh) 1.2+
-- [Convex](https://docs.convex.dev) deployment (self-host project)
+- [Convex](https://docs.convex.dev) project (created from this repo)
 - [OpenAI API key](https://platform.openai.com/api-keys) (set in Convex env)
 - [GitHub Personal Access Token](https://github.com/settings/tokens) (set in Convex env)
 
@@ -42,17 +42,23 @@ bun install
 
 # Configure environment
 cp .env.example .env
-# Edit .env with your credentials
+# Set CONVEX_URL from `npx convex dev`
 ```
 
 ### Database Setup
 
-Convex schema and cron jobs live in `/Users/bigmac/projects/personal/self-host/convex/`.
-Deploy with:
+Convex schema and cron jobs live in `convex/` in this repo.
 
 ```bash
-cd /Users/bigmac/projects/personal/self-host
-CONVEX_DEPLOY_KEY="$(cat .convex-deploy-key)" npx convex deploy
+# One-time: create a new Convex project and dev deployment
+npx convex dev
+
+# Deploy functions (dev or prod)
+npx convex deploy
+
+# Set required secrets in Convex
+npx convex env set GITHUB_TOKEN "github_pat_..."
+npx convex env set OPENAI_API_KEY "sk-..."
 ```
 
 ### Import Your Stars
@@ -78,7 +84,7 @@ Add to your Claude MCP configuration (`~/.mcp.json` or Claude Desktop settings):
       "command": "bun",
       "args": ["run", "/path/to/star-vault/mcp-server/index.ts"],
       "env": {
-        "CONVEX_URL": "https://utmost-gerbil-770.convex.cloud"
+        "CONVEX_URL": "https://your-deployment.convex.cloud"
       }
     }
   }
@@ -122,8 +128,8 @@ Once configured, ask Claude things like:
 | ------------------- | -------- | ------------------------------- |
 | `CONVEX_URL`        | Yes      | Convex deployment URL           |
 | `CONVEX_DEPLOY_KEY` | No       | Convex CLI deploy/run access    |
-| `OPENAI_API_KEY`    | No       | Set in Convex env for embeddings|
-| `GITHUB_TOKEN`      | No       | Set in Convex env for GitHub API|
+| `OPENAI_API_KEY`    | Yes      | Set in Convex env for embeddings/search |
+| `GITHUB_TOKEN`      | Yes      | Set in Convex env for GitHub API|
 
 ## Database Schema
 

@@ -1,25 +1,67 @@
 #!/usr/bin/env node
 /**
  * Star Vault MCP Server
- * Semantic search over GitHub starred repositories
+ * Semantic search over GitHub starred repositories using Supabase
  */
 
 import "dotenv/config";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { ConvexHttpClient } from "convex/browser";
-import { api } from "../src/utils/convexApi.js";
+import { createClient } from "@supabase/supabase-js";
+import OpenAI from "openai";
 
-const convexUrl = process.env.CONVEX_URL;
-if (!convexUrl) {
-  throw new Error("CONVEX_URL is required for Star Vault MCP server");
+// Environment validation
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const openaiKey = process.env.OPENAI_API_KEY;
+const schema = process.env.SUPABASE_SCHEMA || "star_vault";
+
+if (!supabaseUrl || !supabaseKey) {
+  throw new Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required");
 }
-const convex = new ConvexHttpClient(convexUrl);
+if (!openaiKey) {
+  throw new Error("OPENAI_API_KEY is required for embeddings");
+}
+
+// Initialize clients
+const supabase = createClient(supabaseUrl, supabaseKey, {
+  db: { schema },
+});
+const openai = new OpenAI({ apiKey: openaiKey });
+
+// Generate embedding for a query
+async function getEmbedding(text: string): Promise<number[]> {
+  const response = await openai.embeddings.create({
+    model: "text-embedding-3-small",
+    input: text,
+  });
+  return response.data[0].embedding;
+}
+
+// Format repo result for display
+interface Repo {
+  id: number;
+  full_name: string;
+  description?: string;
+  topics?: string[];
+  language?: string;
+  stargazers_count?: number;
+  forks_count?: number;
+  license?: string;
+  html_url: string;
+  starred_at?: string;
+  readme_content?: string;
+  package_json?: Record<string, unknown>;
+}
+
+interface SearchResult extends Repo {
+  similarity: number;
+}
 
 const server = new McpServer({
   name: "star-vault",
-  version: "1.0.0",
+  version: "2.0.0",
 });
 
 // Tool: Search repos by semantic query
@@ -39,28 +81,43 @@ server.tool(
   },
   async ({ query, limit = 10, language, min_stars }) => {
     try {
-      const data = await convex.action(api.starVaultQueries.searchRepos, {
-        query,
-        limit,
-        language,
-        min_stars,
+      const embedding = await getEmbedding(query);
+
+      // Call the search function
+      const { data, error } = await supabase.rpc("search_repos", {
+        query_embedding: JSON.stringify(embedding),
+        match_threshold: 0.5,
+        match_count: limit * 2, // Fetch extra for filtering
       });
 
-      if (!data || data.length === 0) {
+      if (error) throw error;
+
+      let results: SearchResult[] = data || [];
+
+      // Apply additional filters
+      if (language) {
+        results = results.filter(
+          (r) => r.language?.toLowerCase() === language.toLowerCase(),
+        );
+      }
+      if (min_stars) {
+        results = results.filter((r) => (r.stargazers_count ?? 0) >= min_stars);
+      }
+
+      results = results.slice(0, limit);
+
+      if (results.length === 0) {
         return {
           content: [{ type: "text", text: "No matching repositories found." }],
         };
       }
 
-      const results = data.map((entry: any, i: number) => {
-        const repo = entry.repo;
-        const similarity = (entry.score * 100).toFixed(1);
+      const formatted = results.map((repo, i) => {
+        const similarity = ((repo.similarity ?? 0) * 100).toFixed(1);
         return `${i + 1}. **${repo.full_name}** (${similarity}% match)
-   ⭐ ${repo.stargazers_count ?? 0} | 🍴 ${repo.forks_count ?? 0} | ${
-     repo.language || "Unknown"
-   }
+   ⭐ ${repo.stargazers_count ?? 0} | 🍴 ${repo.forks_count ?? 0} | ${repo.language || "Unknown"}
    ${repo.description || "No description"}
-   Topics: ${(repo.topics as string[])?.join(", ") || "none"}
+   Topics: ${repo.topics?.join(", ") || "none"}
    URL: ${repo.html_url}`;
       });
 
@@ -68,7 +125,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Found ${data.length} matching repositories:\n\n${results.join("\n\n")}`,
+            text: `Found ${results.length} matching repositories:\n\n${formatted.join("\n\n")}`,
           },
         ],
       };
@@ -94,11 +151,13 @@ server.tool(
   },
   async ({ full_name }) => {
     try {
-      const repo = await convex.query(api.starVaultQueries.getRepoDetails, {
-        full_name,
-      });
+      const { data: repo, error } = await supabase
+        .from("repos")
+        .select("*")
+        .eq("full_name", full_name)
+        .single();
 
-      if (!repo) {
+      if (error || !repo) {
         return {
           content: [
             {
@@ -113,8 +172,8 @@ server.tool(
         ? `\n\n## README (excerpt)\n\n${repo.readme_content.slice(0, 3000)}${repo.readme_content.length > 3000 ? "..." : ""}`
         : "";
 
-      const deps = repo.dependencies
-        ? `\n\n## Dependencies\n${(repo.dependencies as string[]).slice(0, 20).join(", ")}${(repo.dependencies as string[]).length > 20 ? "..." : ""}`
+      const deps = repo.package_json?.dependencies
+        ? `\n\n## Dependencies\n${Object.keys(repo.package_json.dependencies).slice(0, 20).join(", ")}${Object.keys(repo.package_json.dependencies).length > 20 ? "..." : ""}`
         : "";
 
       return {
@@ -128,10 +187,10 @@ ${repo.description || "No description"}
 **Language:** ${repo.language || "Unknown"}
 **Stars:** ${repo.stargazers_count ?? 0} | **Forks:** ${repo.forks_count ?? 0}
 **License:** ${repo.license || "Unknown"}
-**Topics:** ${(repo.topics as string[])?.join(", ") || "none"}
+**Topics:** ${repo.topics?.join(", ") || "none"}
 
 **URL:** ${repo.html_url}
-**Starred:** ${repo.starred_at ? new Date(repo.starred_at as string).toLocaleDateString() : "Unknown"}${readme}${deps}`,
+**Starred:** ${repo.starred_at ? new Date(repo.starred_at).toLocaleDateString() : "Unknown"}${readme}${deps}`,
           },
         ],
       };
@@ -155,16 +214,49 @@ server.tool(
   {},
   async () => {
     try {
-      const stats = await convex.query(api.starVaultQueries.getStats, {});
+      // Get total count
+      const { count: totalRepos } = await supabase
+        .from("repos")
+        .select("*", { count: "exact", head: true });
 
-      if (!stats) {
-        return {
-          content: [{ type: "text", text: "No statistics available." }],
-        };
-      }
+      // Get count with embeddings
+      const { count: withEmbeddings } = await supabase
+        .from("repos")
+        .select("*", { count: "exact", head: true })
+        .not("embedding", "is", null);
 
-      const topLangs =
-        (stats.top_languages as string[])?.slice(0, 10).join(", ") || "N/A";
+      // Get count with readme
+      const { count: withReadme } = await supabase
+        .from("repos")
+        .select("*", { count: "exact", head: true })
+        .not("readme_content", "is", null);
+
+      // Get top languages
+      const { data: langData } = await supabase
+        .from("repos")
+        .select("language")
+        .not("language", "is", null);
+
+      const langCounts: Record<string, number> = {};
+      langData?.forEach((r) => {
+        if (r.language) {
+          langCounts[r.language] = (langCounts[r.language] || 0) + 1;
+        }
+      });
+      const topLangs = Object.entries(langCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10)
+        .map(([lang, count]) => `${lang} (${count})`)
+        .join(", ");
+
+      // Get last sync
+      const { data: syncData } = await supabase
+        .from("sync_state")
+        .select("last_sync_at")
+        .order("last_sync_at", { ascending: false })
+        .limit(1);
+
+      const lastSync = syncData?.[0]?.last_sync_at;
 
       return {
         content: [
@@ -172,13 +264,13 @@ server.tool(
             type: "text",
             text: `# Star Vault Statistics
 
-**Total Repositories:** ${stats.total_repos}
-**With Embeddings:** ${stats.with_embeddings}
-**With README:** ${stats.with_readme}
+**Total Repositories:** ${totalRepos ?? 0}
+**With Embeddings:** ${withEmbeddings ?? 0}
+**With README:** ${withReadme ?? 0}
 
-**Top Languages:** ${topLangs}
+**Top Languages:** ${topLangs || "N/A"}
 
-**Last Synced:** ${stats.last_sync ? new Date(stats.last_sync as string).toLocaleString() : "Never"}`,
+**Last Synced:** ${lastSync ? new Date(lastSync).toLocaleString() : "Never"}`,
           },
         ],
       };
@@ -214,11 +306,23 @@ server.tool(
   },
   async ({ language, limit = 20, sort_by = "stars" }) => {
     try {
-      const data = await convex.query(api.starVaultQueries.listByLanguage, {
-        language,
-        limit,
-        sort_by,
-      });
+      const sortColumn =
+        sort_by === "stars"
+          ? "stargazers_count"
+          : sort_by === "forks"
+            ? "forks_count"
+            : "starred_at";
+
+      const { data, error } = await supabase
+        .from("repos")
+        .select(
+          "full_name, description, stargazers_count, forks_count, html_url",
+        )
+        .ilike("language", language)
+        .order(sortColumn, { ascending: false })
+        .limit(limit);
+
+      if (error) throw error;
 
       if (!data || data.length === 0) {
         return {
@@ -228,7 +332,7 @@ server.tool(
         };
       }
 
-      const results = data.map((repo: any, i: number) => {
+      const results = data.map((repo, i) => {
         return `${i + 1}. **${repo.full_name}** ⭐ ${repo.stargazers_count ?? 0}
    ${repo.description || "No description"}`;
       });
@@ -271,13 +375,37 @@ server.tool(
   },
   async ({ full_name, limit = 5 }) => {
     try {
-      // Get the embedding for the source repo
-      const data = await convex.action(api.starVaultQueries.findSimilar, {
-        full_name,
-        limit,
+      // Get the source repo's embedding
+      const { data: sourceRepo, error: sourceError } = await supabase
+        .from("repos")
+        .select("embedding")
+        .eq("full_name", full_name)
+        .single();
+
+      if (sourceError || !sourceRepo?.embedding) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Repository "${full_name}" not found or has no embedding.`,
+            },
+          ],
+        };
+      }
+
+      // Search for similar repos using the embedding
+      const { data, error } = await supabase.rpc("search_repos", {
+        query_embedding: JSON.stringify(sourceRepo.embedding),
+        match_threshold: 0.5,
+        match_count: limit + 1, // +1 to exclude the source repo
       });
 
-      const similar = data ?? [];
+      if (error) throw error;
+
+      // Filter out the source repo
+      const similar = (data || [])
+        .filter((r: SearchResult) => r.full_name !== full_name)
+        .slice(0, limit);
 
       if (similar.length === 0) {
         return {
@@ -285,15 +413,12 @@ server.tool(
         };
       }
 
-      const results = similar.map(
-        (entry: { repo: any; score: number }, i: number) => {
-          const repo = entry.repo;
-          const similarity = (entry.score * 100).toFixed(1);
-          return `${i + 1}. **${repo.full_name}** (${similarity}% similar)
+      const results = similar.map((repo: SearchResult, i: number) => {
+        const similarity = ((repo.similarity ?? 0) * 100).toFixed(1);
+        return `${i + 1}. **${repo.full_name}** (${similarity}% similar)
    ⭐ ${repo.stargazers_count ?? 0} | ${repo.language || "Unknown"}
    ${repo.description || "No description"}`;
-        },
-      );
+      });
 
       return {
         content: [
@@ -320,7 +445,7 @@ server.tool(
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Star Vault MCP Server running on stdio");
+  console.error("Star Vault MCP Server v2.0.0 (Supabase) running on stdio");
 }
 
 main().catch(console.error);

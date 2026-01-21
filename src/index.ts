@@ -5,7 +5,7 @@
  */
 
 import { config } from "dotenv";
-import { getStats, syncStarVault } from "./utils/convex.js";
+import { getStats, syncStarVault } from "./utils/supabase.js";
 
 config({ override: true });
 
@@ -102,10 +102,10 @@ switch (command) {
 Star Vault CLI - GitHub Starred Repos Intelligence
 
 Usage:
-  npm run import         Fetch starred repos from GitHub (Convex)
-  npm run fetch-content  Fetch README/package.json content (Convex)
-  npm run embeddings     Generate embeddings (Convex)
-  npm run sync           Run full sync (Convex)
+  npm run import         Fetch starred repos from GitHub
+  npm run fetch-content  Fetch README/package.json content
+  npm run embeddings     Generate embeddings
+  npm run sync           Run full sync
   npm run stats          Show database statistics
 `);
 }
