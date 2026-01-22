@@ -8,8 +8,8 @@ GitHub starred repositories intelligence system. Captures starred repos, extract
 
 | Metric         | Value                              |
 | -------------- | ---------------------------------- |
-| Repos imported | 652                                |
-| Embeddings     | 652 (100%)                         |
+| Repos imported | 678                                |
+| Embeddings     | 678 (100%)                         |
 | Daily sync     | Supabase Edge Function (7 AM UTC)  |
 | MCP Server     | Ready for Claude                   |
 | Database       | Supabase Cloud (star_vault schema) |
@@ -158,7 +158,8 @@ This creates rich searchable text for semantic matching.
 
 The Edge Function at `supabase/functions/star-vault-sync/index.ts`:
 
-- Runs daily at 7 AM UTC via Supabase cron
+- **pg_cron job**: `star-vault-daily-sync`
+- **Schedule**: Daily at 7 AM UTC
 - Fetches new starred repos from GitHub
 - Generates embeddings for repos missing them
 - Writes to `star_vault.repos` and `star_vault.sync_state`
