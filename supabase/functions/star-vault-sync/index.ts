@@ -280,8 +280,10 @@ Deno.serve(async (req) => {
       throw new Error("GITHUB_TOKEN is required");
     }
 
-    // Tables are sv_repos and sv_sync_state in public schema
-    const supabase = createClient(supabaseUrl, supabaseKey);
+    // Tables are repos and sync_state in star_vault schema
+    const supabase = createClient(supabaseUrl, supabaseKey, {
+      db: { schema: "star_vault" },
+    });
 
     const results = {
       repos_fetched: 0,
@@ -301,7 +303,7 @@ Deno.serve(async (req) => {
     // Step 2: Upsert repos to database
     for (const repo of repos) {
       const { data: existing } = await supabase
-        .from("sv_repos")
+        .from("repos")
         .select("id")
         .eq("github_id", repo.github_id)
         .single();
@@ -325,17 +327,17 @@ Deno.serve(async (req) => {
       };
 
       if (existing) {
-        await supabase.from("sv_repos").update(repoData).eq("id", existing.id);
+        await supabase.from("repos").update(repoData).eq("id", existing.id);
         results.repos_updated++;
       } else {
-        await supabase.from("sv_repos").insert(repoData);
+        await supabase.from("repos").insert(repoData);
         results.repos_added++;
       }
     }
 
     // Step 3: Fetch content for repos without it (limit to 50 per run)
     const { data: needContent } = await supabase
-      .from("sv_repos")
+      .from("repos")
       .select("id, owner, name, default_branch")
       .is("content_fetched_at", null)
       .limit(50);
@@ -348,7 +350,7 @@ Deno.serve(async (req) => {
         ]);
 
         await supabase
-          .from("sv_repos")
+          .from("repos")
           .update({
             readme_content: readme,
             package_json: packageJson,
@@ -367,7 +369,7 @@ Deno.serve(async (req) => {
     // Step 4: Generate embeddings for repos without them (limit to 20 per run)
     if (openaiKey) {
       const { data: needEmbeddings } = await supabase
-        .from("sv_repos")
+        .from("repos")
         .select(
           "id, full_name, description, language, topics, license, stargazers_count, forks_count, readme_content, package_json",
         )
@@ -391,10 +393,7 @@ Deno.serve(async (req) => {
 
           const embedding = await generateEmbedding(text, openaiKey);
 
-          await supabase
-            .from("sv_repos")
-            .update({ embedding })
-            .eq("id", repo.id);
+          await supabase.from("repos").update({ embedding }).eq("id", repo.id);
           results.embeddings_generated++;
         } catch (e) {
           results.errors.push(`Embedding error for ${repo.full_name}: ${e}`);
@@ -403,7 +402,7 @@ Deno.serve(async (req) => {
     }
 
     // Record sync state
-    await supabase.from("sv_sync_state").insert({
+    await supabase.from("sync_state").insert({
       last_sync_at: new Date().toISOString(),
       repos_added: results.repos_added,
       repos_updated: results.repos_updated,
