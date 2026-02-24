@@ -1,165 +1,100 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project Overview
 
-GitHub starred repositories intelligence system. Captures starred repos, extracts README content, generates OpenAI embeddings, and enables semantic search via MCP server.
+Star Vault is a Supabase-only GitHub stars intelligence system.
 
-| Metric         | Value                              |
-| -------------- | ---------------------------------- |
-| Repos imported | 678                                |
-| Embeddings     | 678 (100%)                         |
-| Daily sync     | Supabase Edge Function (7 AM UTC)  |
-| MCP Server     | Ready for Claude                   |
-| Database       | Supabase Cloud (star_vault schema) |
+It imports starred repos from GitHub, fetches README/package metadata,
+generates OpenAI embeddings, and serves semantic retrieval through an MCP
+server.
+
+## Canonical Runtime
+
+- Runtime: Bun + TypeScript
+- Backend: Supabase only
+- Schema: `star_vault`
+- Tables: `repos`, `sync_state`
+- Search RPC: `search_repos`
+- Embedding model: `text-embedding-3-small` (1536 dimensions)
+
+Legacy Convex artifacts have been removed and are no longer part of this
+repository.
 
 ## Commands
 
 ```bash
-# Development
-bun install                    # Install dependencies
-bun run typecheck              # TypeScript checking
+# Install / checks
+bun install
+bun run typecheck
 
-# Sync operations (CLI → Supabase Cloud)
-bun run import                 # Import starred repos from GitHub
-bun run fetch-content          # Fetch README/package.json (batch 50)
-bun run embeddings             # Generate embeddings (batch 20)
-bun run sync                   # Full sync (all steps)
-bun run stats                  # Show vault statistics
+# Sync lifecycle
+bun run import
+bun run fetch-content
+bun run embeddings
+bun run sync
+bun run stats
 
-# MCP Server
-bun run mcp                    # Run standalone for testing
+# MCP server
+bun run mcp
 ```
 
-## Architecture
+## CLI Flags
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         CLI Layer                                │
-│  src/index.ts → src/utils/supabase.ts → Supabase Client         │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│                    Supabase Cloud Backend                        │
-│  Database: brawengrbiuvnmsyqhoe.supabase.co (star_vault schema) │
-│  Tables: repos, sync_state                                       │
-│  RPC: search_repos (vector similarity search)                    │
-│  Edge Function: star-vault-sync (daily cron at 7 AM UTC)        │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│                       MCP Server (Supabase)                      │
-│  mcp-server/index.ts → 5 tools → Claude Code integration        │
-│  Uses: @supabase/supabase-js, OpenAI embeddings                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+Supported on sync-style commands:
 
-**Note**: All components (CLI, MCP Server, Edge Function) use the same Supabase Cloud database with `star_vault` schema.
+- `--max-pages <n>`
+- `--content-limit <n>`
+- `--embedding-limit <n>`
+- `--concurrency-content <n>`
+- `--concurrency-embeddings <n>`
 
-### Data Flow
+## Database Migrations
 
-1. **Import**: GitHub API → `syncStarVault` → `star_vault.repos` table
-2. **Content**: Raw GitHub → README + package.json → stored in repo row
-3. **Embeddings**: OpenAI text-embedding-3-small → 1536d vector stored
-4. **Search**: Query → embed → `search_repos` RPC → filter → results
+Apply in order:
 
-### Key Patterns
+1. `supabase/migrations/0001_initial_schema.sql`
+2. `supabase/migrations/0002_move_to_public_schema.sql` (obsolete no-op)
+3. `supabase/migrations/0003..0013_legacy_remote_placeholder.sql`
+4. `supabase/migrations/0014_reconcile_star_vault_canonical.sql`
 
-- **Edge Function** for daily automated sync (GitHub + embeddings)
-- **CLI** for manual sync operations
-- **MCP Server** for Claude Code integration
-- **Vector search** via `search_repos` RPC (pgvector)
-- **Batched processing**: content (50/run), embeddings (20/run)
+The canonical reconciliation is in `0014`.
 
-## Database Schema (Supabase)
+## Operational Runbook
 
-| Table        | Purpose                                    |
-| ------------ | ------------------------------------------ |
-| `repos`      | Starred repos with 1536d embedding vectors |
-| `sync_state` | Sync history and statistics                |
+### Daily/Manual Sync
 
-### repos indexes
-
-- `repos_github_id_key` - unique lookup by GitHub ID
-- `repos_embedding_idx` - HNSW vector index (1536 dimensions)
-
-## Environment Variables
-
-### CLI & MCP Server (.env)
-
-| Variable                    | Description                      |
-| --------------------------- | -------------------------------- |
-| `SUPABASE_URL`              | Supabase Cloud project URL       |
-| `SUPABASE_SERVICE_ROLE_KEY` | Service role key (not anon key!) |
-| `OPENAI_API_KEY`            | For embedding generation         |
-| `GITHUB_TOKEN`              | GitHub PAT with `repo` scope     |
-| `SUPABASE_SCHEMA`           | `star_vault` (default)           |
-
-### MCP Server (configured in Claude Code)
-
-| Variable                     | Value                                      |
-| ---------------------------- | ------------------------------------------ |
-| `SUPABASE_URL`               | `https://brawengrbiuvnmsyqhoe.supabase.co` |
-| `SUPABASE_SERVICE_ROLE_KEY`  | `${PRIVATEBASE_SERVICE_ROLE_KEY}`          |
-| `OPENAI_API_KEY`             | `${OPENAI_API_KEY}`                        |
-| `SUPABASE_SCHEMA` (optional) | `star_vault` (default)                     |
-
-## File Structure
-
-```
-src/
-  index.ts              # CLI entry point
-  utils/
-    supabase.ts         # Supabase client + sync operations
-  github/
-    starred.ts          # Fetch starred repos from GitHub
-    content.ts          # Fetch README/package.json
-
-supabase/
-  functions/
-    star-vault-sync/    # Edge Function for daily sync
-
-mcp-server/
-  index.ts              # MCP server (5 tools)
-
-convex/                 # (Legacy, deprecated - migrated to Supabase)
+```bash
+bun run sync
 ```
 
-## MCP Tools
+Recommended constrained smoke run:
 
-| Tool               | Type   | Description                      |
-| ------------------ | ------ | -------------------------------- |
-| `search_repos`     | action | Semantic search (embeds query)   |
-| `get_repo_details` | query  | Get repo by full_name            |
-| `list_by_language` | query  | Filter by language               |
-| `find_similar`     | action | Find similar repos (uses vector) |
-| `get_stats`        | query  | Vault statistics                 |
+```bash
+bun run sync --max-pages 1 --content-limit 10 --embedding-limit 10
+```
 
-## Development Workflow
+### Read-Path Smoke Checks
 
-1. Make changes to CLI or MCP server
-2. Test via CLI: `bun run stats` or `bun run sync`
-3. Type check: `bun run typecheck`
-4. Test MCP: `bun run mcp` (standalone mode)
+1. `bun run stats` returns coherent counts and last sync timestamp.
+2. `bun run import --max-pages 1` can read current starred repos.
+3. Semantic search works with real embeddings (`search_repos` RPC or MCP tool).
 
-## Embedding Strategy
+### MCP Smoke
 
-The embedding text combines:
+Run `bun run mcp` and verify:
 
-- Repository full name and description
-- Language, topics, license, star/fork counts
-- First 6000 chars of README
-- Dependency names from package.json
+- `search_repos`
+- `get_repo_details`
+- `list_by_language`
+- `find_similar`
+- `get_stats`
 
-This creates rich searchable text for semantic matching.
+If MCP startup fails schema checks, re-apply `0014_reconcile_star_vault_canonical.sql`.
 
-## Edge Function (Daily Sync)
+## Troubleshooting
 
-The Edge Function at `supabase/functions/star-vault-sync/index.ts`:
-
-- **pg_cron job**: `star-vault-daily-sync`
-- **Schedule**: Daily at 7 AM UTC
-- Fetches new starred repos from GitHub
-- Generates embeddings for repos missing them
-- Writes to `star_vault.repos` and `star_vault.sync_state`
+- Missing env vars: ensure `.env` defines `SUPABASE_URL`,
+  `SUPABASE_SERVICE_ROLE_KEY`, `GITHUB_TOKEN`, `OPENAI_API_KEY`.
+- Repeated content fetches: candidates are now based on
+  `content_fetched_at is null`; check data integrity if behavior regresses.
+- Search field drift: `search_repos` output contract is owned by migration `003`.

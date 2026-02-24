@@ -5,60 +5,143 @@
  */
 
 import { config } from "dotenv";
-import { getStats, syncStarVault } from "./utils/supabase.js";
+import {
+  getStats,
+  syncStarVault,
+  type SyncOptions,
+} from "./utils/supabase.js";
 
 config({ override: true });
 
-async function importStarredRepos(): Promise<void> {
+interface CliFlags {
+  maxPages?: number;
+  contentLimit?: number;
+  embeddingLimit?: number;
+  contentConcurrency?: number;
+  embeddingConcurrency?: number;
+}
+
+function parseNumberFlag(name: string, args: string[]): number | undefined {
+  const inline = args.find((arg) => arg.startsWith(`${name}=`));
+  if (inline) {
+    const value = Number(inline.split("=")[1]);
+    return Number.isFinite(value) ? value : undefined;
+  }
+
+  const index = args.indexOf(name);
+  if (index >= 0 && index + 1 < args.length) {
+    const value = Number(args[index + 1]);
+    return Number.isFinite(value) ? value : undefined;
+  }
+
+  return undefined;
+}
+
+function parseFlags(): CliFlags {
+  const args = process.argv.slice(3);
+  return {
+    maxPages: parseNumberFlag("--max-pages", args),
+    contentLimit: parseNumberFlag("--content-limit", args),
+    embeddingLimit: parseNumberFlag("--embedding-limit", args),
+    contentConcurrency: parseNumberFlag("--concurrency-content", args),
+    embeddingConcurrency: parseNumberFlag("--concurrency-embeddings", args),
+  };
+}
+
+function getSyncOptions(base: SyncOptions, flags: CliFlags): SyncOptions {
+  return {
+    ...base,
+    maxPages: flags.maxPages ?? base.maxPages,
+    contentLimit: flags.contentLimit ?? base.contentLimit,
+    embeddingLimit: flags.embeddingLimit ?? base.embeddingLimit,
+    contentConcurrency: flags.contentConcurrency ?? base.contentConcurrency,
+    embeddingConcurrency:
+      flags.embeddingConcurrency ?? base.embeddingConcurrency,
+  };
+}
+
+function printSyncDetails(result: Awaited<ReturnType<typeof syncStarVault>>): void {
+  console.log("Durations (ms):", result.phase_durations_ms);
+  if (result.errors.length > 0) {
+    console.log("Error summary:", result.error_summary);
+    console.log(`Errors captured: ${result.errors.length}`);
+  }
+}
+
+async function importStarredRepos(flags: CliFlags): Promise<void> {
   console.log("📦 Syncing starred repositories...\n");
-  const result = await syncStarVault({
-    fetchRepos: true,
-    contentLimit: 0,
-    embeddingLimit: 0,
-    syncType: "import",
-  });
+  const result = await syncStarVault(
+    getSyncOptions(
+      {
+        fetchRepos: true,
+        contentLimit: 0,
+        embeddingLimit: 0,
+        syncType: "import",
+      },
+      flags,
+    ),
+  );
 
   console.log(
     `✅ Fetched ${result.repos_fetched} repos (added ${result.repos_added}, updated ${result.repos_updated})\n`,
   );
+  printSyncDetails(result);
 }
 
-async function fetchContent(): Promise<void> {
+async function fetchContent(flags: CliFlags): Promise<void> {
   console.log("📖 Fetching README/package.json content...\n");
-  const result = await syncStarVault({
-    fetchRepos: false,
-    contentLimit: 50,
-    embeddingLimit: 0,
-    syncType: "content",
-  });
+  const result = await syncStarVault(
+    getSyncOptions(
+      {
+        fetchRepos: false,
+        contentLimit: 50,
+        embeddingLimit: 0,
+        syncType: "content",
+      },
+      flags,
+    ),
+  );
 
   console.log(`✅ Content fetched: ${result.content_fetched}\n`);
+  printSyncDetails(result);
 }
 
-async function processEmbeddings(): Promise<void> {
+async function processEmbeddings(flags: CliFlags): Promise<void> {
   console.log("🧠 Generating embeddings...\n");
-  const result = await syncStarVault({
-    fetchRepos: false,
-    contentLimit: 0,
-    embeddingLimit: 20,
-    syncType: "embeddings",
-  });
+  const result = await syncStarVault(
+    getSyncOptions(
+      {
+        fetchRepos: false,
+        contentLimit: 0,
+        embeddingLimit: 20,
+        syncType: "embeddings",
+      },
+      flags,
+    ),
+  );
 
   console.log(`✅ Embeddings generated: ${result.embeddings_generated}\n`);
+  printSyncDetails(result);
 }
 
-async function fullSync(): Promise<void> {
+async function fullSync(flags: CliFlags): Promise<void> {
   console.log("🔄 Running full sync...\n");
-  const result = await syncStarVault({
-    fetchRepos: true,
-    contentLimit: 50,
-    embeddingLimit: 20,
-    syncType: "manual",
-  });
+  const result = await syncStarVault(
+    getSyncOptions(
+      {
+        fetchRepos: true,
+        contentLimit: 50,
+        embeddingLimit: 20,
+        syncType: "manual",
+      },
+      flags,
+    ),
+  );
 
   console.log(
     `✅ Sync complete (added ${result.repos_added}, updated ${result.repos_updated}, content ${result.content_fetched}, embeddings ${result.embeddings_generated})\n`,
   );
+  printSyncDetails(result);
 }
 
 async function showStats(): Promise<void> {
@@ -80,19 +163,20 @@ async function showStats(): Promise<void> {
 
 // CLI command handler
 const command = process.argv[2];
+const flags = parseFlags();
 
 switch (command) {
   case "import":
-    importStarredRepos().catch(console.error);
+    importStarredRepos(flags).catch(console.error);
     break;
   case "fetch-content":
-    fetchContent().catch(console.error);
+    fetchContent(flags).catch(console.error);
     break;
   case "embeddings":
-    processEmbeddings().catch(console.error);
+    processEmbeddings(flags).catch(console.error);
     break;
   case "sync":
-    fullSync().catch(console.error);
+    fullSync(flags).catch(console.error);
     break;
   case "stats":
     showStats().catch(console.error);
@@ -102,10 +186,17 @@ switch (command) {
 Star Vault CLI - GitHub Starred Repos Intelligence
 
 Usage:
-  npm run import         Fetch starred repos from GitHub
-  npm run fetch-content  Fetch README/package.json content
-  npm run embeddings     Generate embeddings
-  npm run sync           Run full sync
-  npm run stats          Show database statistics
+  bun run import         Fetch starred repos from GitHub
+  bun run fetch-content  Fetch README/package.json content
+  bun run embeddings     Generate embeddings
+  bun run sync           Run full sync
+  bun run stats          Show database statistics
+
+Optional flags:
+  --max-pages <n>                Limit GitHub pages read during repo fetch
+  --content-limit <n>            Override content batch size
+  --embedding-limit <n>          Override embeddings batch size
+  --concurrency-content <n>      Content fetch worker concurrency
+  --concurrency-embeddings <n>   Embeddings worker concurrency
 `);
 }

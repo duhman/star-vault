@@ -176,7 +176,7 @@ export async function getStarredCount(): Promise<number> {
   const client = getGitHubClient();
 
   // Fetch just 1 repo but check the Link header for total
-  const { headers } = await client.request<unknown[]>(
+  const { data, headers } = await client.request<unknown[]>(
     "/user/starred?per_page=1",
   );
 
@@ -189,6 +189,6 @@ export async function getStarredCount(): Promise<number> {
     }
   }
 
-  // If no pagination, there's 1 or fewer repos
-  return 1;
+  // If no pagination, the exact count is the number of returned rows (0 or 1)
+  return data.length;
 }

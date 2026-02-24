@@ -1,177 +1,113 @@
-# ⭐ Star Vault
+# Star Vault
 
-**GitHub Stars Intelligence System** — Capture your starred repositories, extract content, generate embeddings, and search them semantically via Claude MCP.
+Supabase-backed GitHub stars intelligence system.
 
-Ever starred hundreds of repos and forgot what's in there? Star Vault makes your GitHub stars searchable with natural language queries like _"that React animation library"_ or _"CLI tools for database migrations"_.
-
-## Features
-
-- 🔍 **Semantic Search** — Find repos by description, not just keywords
-- 📚 **README Extraction** — Captures full README content for better context
-- 🤖 **Claude MCP Integration** — Query your stars directly from Claude
-- ⏰ **Daily Sync** — Automatically captures new stars via Supabase Edge Function
-- 🧠 **Smart Embeddings** — OpenAI text-embedding-3-small (1536 dimensions)
-- ⚡ **Fast Vector Search** — pgvector with HNSW index
+Star Vault imports your starred repositories, fetches README/package metadata,
+generates embeddings, and exposes semantic search through CLI and MCP tools.
 
 ## Architecture
 
+```text
+GitHub API -> import repos -> fetch README/package.json -> generate embeddings
+                                                     |
+                                                     v
+                                            Supabase (star_vault)
+                                                     |
+                                                     v
+                                              MCP Server tools
 ```
-GitHub API → Fetch Repos → Extract README → Generate Embeddings → Supabase
-                                                                       ↓
-                                                                 MCP Server → Claude
-```
 
-**Database**: Supabase Cloud with `star_vault` schema
-**Tables**: `repos`, `sync_state`
-**Search**: `search_repos` RPC function (pgvector similarity)
+- Runtime: Bun + TypeScript
+- Database: Supabase Postgres + pgvector
+- Embeddings: OpenAI `text-embedding-3-small` (1536-d)
+- Canonical schema: `star_vault`
+- Canonical tables: `star_vault.repos`, `star_vault.sync_state`
+- Canonical RPC: `star_vault.search_repos`
 
-## Quick Start
+## Prerequisites
 
-### Prerequisites
+- Bun 1.2+
+- Supabase project with pgvector extension
+- GitHub PAT with access to starred repos
+- OpenAI API key (for embeddings and semantic query embedding)
 
-- [Bun](https://bun.sh) 1.2+
-- [Supabase](https://supabase.com) project with pgvector enabled
-- [OpenAI API key](https://platform.openai.com/api-keys)
-- [GitHub Personal Access Token](https://github.com/settings/tokens)
-
-### Installation
+## Setup
 
 ```bash
-# Clone the repository
-git clone https://github.com/duhman/star-vault.git
-cd star-vault
-
-# Install dependencies
 bun install
-
-# Configure environment
 cp .env.example .env
-# Set SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, OPENAI_API_KEY, GITHUB_TOKEN
 ```
 
-### Database Setup
+Set required variables in `.env`:
 
-Run the migrations in `supabase/migrations/` via Supabase SQL Editor or CLI:
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `OPENAI_API_KEY`
+- `GITHUB_TOKEN`
 
-```sql
--- 001_initial_schema.sql creates:
--- - star_vault schema
--- - repos table with embedding column
--- - sync_state table
--- - search_repos function
--- - HNSW vector index
-```
+## Database Migrations
 
-### Import Your Stars
+Apply migrations in order:
+
+1. `0001_initial_schema.sql`
+2. `0002_move_to_public_schema.sql` (obsolete no-op kept for compatibility)
+3. `0003..0013_legacy_remote_placeholder.sql` (history alignment placeholders)
+4. `0014_reconcile_star_vault_canonical.sql`
+
+`0014` is the source of truth for canonical `star_vault.*` structure and RPC
+shape used by CLI and MCP.
+
+## CLI Commands
 
 ```bash
-# Full import (recommended for first run)
+bun run import
+bun run fetch-content
+bun run embeddings
 bun run sync
-
-# Or run individual steps
-bun run import         # Fetch starred repos from GitHub
-bun run fetch-content  # Extract README content
-bun run embeddings     # Generate vector embeddings
+bun run stats
 ```
 
-## MCP Server Setup
+### Optional Flags
 
-Add to your Claude MCP configuration (`~/.config/claude-code/settings.json` or Claude Desktop):
+- `--max-pages <n>` limit GitHub pages fetched during import/sync
+- `--content-limit <n>` override content batch size
+- `--embedding-limit <n>` override embedding batch size
+- `--concurrency-content <n>` content worker concurrency
+- `--concurrency-embeddings <n>` embedding worker concurrency
 
-```json
-{
-  "mcpServers": {
-    "star-vault": {
-      "command": "bun",
-      "args": ["run", "/path/to/star-vault/mcp-server/index.ts"],
-      "env": {
-        "SUPABASE_URL": "https://your-project.supabase.co",
-        "SUPABASE_SERVICE_ROLE_KEY": "your-service-role-key",
-        "OPENAI_API_KEY": "sk-..."
-      }
-    }
-  }
-}
+Examples:
+
+```bash
+bun run import --max-pages 1
+bun run sync --max-pages 1 --content-limit 10 --embedding-limit 10
 ```
 
-### Available MCP Tools
+## MCP Server
 
-| Tool               | Description                               |
-| ------------------ | ----------------------------------------- |
-| `search_repos`     | Semantic search over starred repositories |
-| `get_repo_details` | Get specific repo by owner/name           |
-| `list_by_language` | Browse repos by programming language      |
-| `find_similar`     | Find repos similar to a given one         |
-| `get_stats`        | Show vault statistics                     |
+Run standalone:
 
-### Example Queries
+```bash
+bun run mcp
+```
 
-Once configured, ask Claude things like:
+MCP tools:
 
-- _"Search my starred repos for state management libraries"_
-- _"Find TypeScript repos related to CLI development"_
-- _"What testing frameworks have I starred?"_
-- _"Show me repos similar to zod"_
+- `search_repos`
+- `get_repo_details`
+- `list_by_language`
+- `find_similar`
+- `get_stats`
 
-## Commands
+The server performs startup checks for canonical table and RPC availability and
+fails fast with actionable errors if schema drift is detected.
 
-| Command                 | Description                               |
-| ----------------------- | ----------------------------------------- |
-| `bun run import`        | Import starred repos from GitHub          |
-| `bun run fetch-content` | Fetch README/package.json content         |
-| `bun run embeddings`    | Generate pending embeddings               |
-| `bun run sync`          | Full sync (import + content + embeddings) |
-| `bun run stats`         | Show vault statistics                     |
-| `bun run mcp`           | Run MCP server standalone                 |
-| `bun run typecheck`     | TypeScript type checking                  |
+## Verification
 
-## Environment Variables
+```bash
+bun run typecheck
+bun run stats
+bun run import --max-pages 1
+```
 
-| Variable                    | Required | Description                         |
-| --------------------------- | -------- | ----------------------------------- |
-| `SUPABASE_URL`              | Yes      | Supabase project URL                |
-| `SUPABASE_SERVICE_ROLE_KEY` | Yes      | Service role key (not anon!)        |
-| `OPENAI_API_KEY`            | Yes      | For embeddings generation           |
-| `GITHUB_TOKEN`              | Yes      | GitHub PAT with `repo` scope        |
-| `SUPABASE_SCHEMA`           | No       | Schema name (default: `star_vault`) |
-
-## Database Schema
-
-### Tables (in `star_vault` schema)
-
-| Table        | Purpose                                          |
-| ------------ | ------------------------------------------------ |
-| `repos`      | Starred repos with metadata and 1536d embeddings |
-| `sync_state` | Sync history and statistics                      |
-
-### Key Functions
-
-- `search_repos` — Vector similarity search via pgvector
-- `get_repo_details` — Get repo by full_name (owner/repo)
-- `get_stats` — Vault statistics
-
-## Automated Daily Sync
-
-The Edge Function at `supabase/functions/star-vault-sync/` runs daily at 7 AM UTC via Supabase cron:
-
-- Fetches new starred repos from GitHub
-- Extracts README and package.json content
-- Generates embeddings for repos missing them
-
-## Tech Stack
-
-- **Runtime**: [Bun](https://bun.sh) 1.2+
-- **Language**: TypeScript 5.7
-- **Database**: [Supabase](https://supabase.com) (PostgreSQL + pgvector)
-- **Embeddings**: OpenAI text-embedding-3-small (1536d)
-- **Vector Index**: HNSW (pgvector)
-- **Validation**: [Zod](https://zod.dev)
-- **MCP**: [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/sdk)
-
-## Related Projects
-
-- [Tweet Vault](https://github.com/duhman/tweet-vault) — Same concept for Twitter bookmarks
-
-## License
-
-MIT
+For semantic smoke testing, run `search_repos` through MCP or call the
+`search_repos` RPC with a real 1536-dimensional query embedding.

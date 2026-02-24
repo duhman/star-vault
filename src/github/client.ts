@@ -2,6 +2,8 @@
  * GitHub API client with PAT authentication
  */
 
+import { fetchWithRetry } from "../utils/retry.js";
+
 const GITHUB_API_BASE = "https://api.github.com";
 
 export interface GitHubClientOptions {
@@ -26,7 +28,7 @@ export class GitHubClient {
       ? endpoint
       : `${GITHUB_API_BASE}${endpoint}`;
 
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
       ...options,
       headers: {
         Accept: "application/vnd.github+json",
@@ -34,6 +36,9 @@ export class GitHubClient {
         "X-GitHub-Api-Version": "2022-11-28",
         ...options.headers,
       },
+    }, {
+      maxAttempts: 3,
+      baseDelayMs: 500,
     });
 
     if (!response.ok) {

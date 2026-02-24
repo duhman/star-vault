@@ -2,9 +2,17 @@
  * Fetch README and package.json content from GitHub repositories
  */
 
-import { getGitHubClient } from "./client.js";
+import { fetchWithRetry } from "../utils/retry.js";
 
 const RAW_CONTENT_BASE = "https://raw.githubusercontent.com";
+
+function getRawHeaders(): HeadersInit {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) return {};
+  return {
+    Authorization: `Bearer ${token}`,
+  };
+}
 
 /**
  * Fetch README content for a repository
@@ -31,7 +39,11 @@ export async function fetchReadme(
   for (const filename of readmeNames) {
     try {
       const url = `${RAW_CONTENT_BASE}/${owner}/${name}/${defaultBranch}/${filename}`;
-      const response = await fetch(url);
+      const response = await fetchWithRetry(
+        url,
+        { headers: getRawHeaders() },
+        { maxAttempts: 3, baseDelayMs: 500 },
+      );
 
       if (response.ok) {
         const content = await response.text();
@@ -56,7 +68,11 @@ export async function fetchPackageJson(
 ): Promise<Record<string, unknown> | null> {
   try {
     const url = `${RAW_CONTENT_BASE}/${owner}/${name}/${defaultBranch}/package.json`;
-    const response = await fetch(url);
+    const response = await fetchWithRetry(
+      url,
+      { headers: getRawHeaders() },
+      { maxAttempts: 3, baseDelayMs: 500 },
+    );
 
     if (response.ok) {
       const content = await response.json();

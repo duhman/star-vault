@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Star Vault MCP Server
- * Semantic search over GitHub starred repositories using Supabase
+ * Semantic search over GitHub starred repositories using Supabase.
  */
 
 import "dotenv/config";
@@ -10,61 +10,132 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
+import {
+  EMBEDDING_DIMENSIONS,
+  EMBEDDING_MODEL,
+  STAR_VAULT_RPC,
+  STAR_VAULT_SCHEMA,
+  STAR_VAULT_TABLES,
+  type SearchRepoRow,
+} from "../src/shared/starVault.js";
 
-// Environment validation
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const openaiKey = process.env.OPENAI_API_KEY;
-const schema = process.env.SUPABASE_SCHEMA || "star_vault";
-
-if (!supabaseUrl || !supabaseKey) {
-  throw new Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required");
+interface RepoDetails {
+  id: number;
+  full_name: string;
+  description?: string | null;
+  topics?: string[] | null;
+  language?: string | null;
+  stargazers_count?: number | null;
+  forks_count?: number | null;
+  license?: string | null;
+  html_url: string;
+  starred_at?: string | null;
+  readme_content?: string | null;
+  package_json?: Record<string, unknown> | null;
 }
-if (!openaiKey) {
-  throw new Error("OPENAI_API_KEY is required for embeddings");
+
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(
+      `Missing ${name}. Set it in .env or MCP env configuration before starting the server.`,
+    );
+  }
+  return value;
 }
 
-// Initialize clients
+const supabaseUrl = requireEnv("SUPABASE_URL");
+const supabaseKey = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
+const openaiKey = requireEnv("OPENAI_API_KEY");
+
 const supabase = createClient(supabaseUrl, supabaseKey, {
-  db: { schema },
+  db: { schema: STAR_VAULT_SCHEMA },
 });
-const openai = new OpenAI({ apiKey: openaiKey });
+const openai = new OpenAI({
+  apiKey: openaiKey,
+  maxRetries: 2,
+  timeout: 20_000,
+});
 
-// Generate embedding for a query
+async function verifyBackendReadiness(): Promise<void> {
+  const { error: tableError } = await supabase
+    .from(STAR_VAULT_TABLES.repos)
+    .select("id")
+    .limit(1);
+
+  if (tableError) {
+    throw new Error(
+      `Supabase table check failed for ${STAR_VAULT_SCHEMA}.${STAR_VAULT_TABLES.repos}: ${tableError.message}. ` +
+        `Ensure migrations for star_vault schema are applied.`,
+    );
+  }
+
+  const zeroVector = Array.from({ length: EMBEDDING_DIMENSIONS }, () => 0);
+  const { error: rpcError } = await supabase.rpc(STAR_VAULT_RPC.searchRepos, {
+    query_embedding: JSON.stringify(zeroVector),
+    match_threshold: 2,
+    match_count: 1,
+  });
+
+  if (rpcError) {
+    throw new Error(
+      `Supabase RPC check failed for ${STAR_VAULT_SCHEMA}.${STAR_VAULT_RPC.searchRepos}: ${rpcError.message}. ` +
+        `Run the canonical reconciliation migration.`,
+    );
+  }
+}
+
 async function getEmbedding(text: string): Promise<number[]> {
   const response = await openai.embeddings.create({
-    model: "text-embedding-3-small",
+    model: EMBEDDING_MODEL,
     input: text,
   });
   return response.data[0].embedding;
 }
 
-// Format repo result for display
-interface Repo {
-  id: number;
-  full_name: string;
-  description?: string;
-  topics?: string[];
-  language?: string;
-  stargazers_count?: number;
-  forks_count?: number;
-  license?: string;
-  html_url: string;
-  starred_at?: string;
-  readme_content?: string;
-  package_json?: Record<string, unknown>;
+async function resolveCanonicalLanguage(input: string): Promise<string | null> {
+  const exact = await supabase
+    .from(STAR_VAULT_TABLES.repos)
+    .select("language")
+    .eq("language", input)
+    .limit(1);
+  if (!exact.error && exact.data && exact.data.length > 0) return input;
+
+  const fallback = await supabase
+    .from(STAR_VAULT_TABLES.repos)
+    .select("language")
+    .ilike("language", input)
+    .limit(1);
+
+  if (fallback.error || !fallback.data || fallback.data.length === 0) {
+    return null;
+  }
+
+  return (fallback.data[0] as { language?: string | null }).language ?? null;
 }
 
-interface SearchResult extends Repo {
-  similarity: number;
+function formatRepoLine(repo: SearchRepoRow, index: number): string {
+  const similarity = ((repo.similarity ?? 0) * 100).toFixed(1);
+  const metrics: string[] = [];
+  if (repo.stargazers_count != null) metrics.push(`⭐ ${repo.stargazers_count}`);
+  if (repo.forks_count != null) metrics.push(`🍴 ${repo.forks_count}`);
+  metrics.push(repo.language || "Unknown");
+  if (repo.starred_at) {
+    metrics.push(`Starred ${new Date(repo.starred_at).toLocaleDateString()}`);
+  }
+
+  return `${index + 1}. **${repo.full_name}** (${similarity}% match)
+   ${metrics.join(" | ")}
+   ${repo.description || "No description"}
+   Topics: ${repo.topics?.join(", ") || "none"}
+   URL: ${repo.html_url}`;
 }
 
 const server = new McpServer({
   name: "star-vault",
-  version: "2.0.0",
+  version: "2.1.0",
 });
 
-// Tool: Search repos by semantic query
 server.tool(
   "search_repos",
   "Search starred GitHub repositories using semantic search. Returns repos matching the query based on their description, README, and topics.",
@@ -82,26 +153,33 @@ server.tool(
   async ({ query, limit = 10, language, min_stars }) => {
     try {
       const embedding = await getEmbedding(query);
-
-      // Call the search function
-      const { data, error } = await supabase.rpc("search_repos", {
+      const { data, error } = await supabase.rpc(STAR_VAULT_RPC.searchRepos, {
         query_embedding: JSON.stringify(embedding),
         match_threshold: 0.5,
-        match_count: limit * 2, // Fetch extra for filtering
+        match_count: limit * 3,
       });
 
       if (error) throw error;
 
-      let results: SearchResult[] = data || [];
+      let results = ((data ?? []) as SearchRepoRow[]).slice();
 
-      // Apply additional filters
       if (language) {
-        results = results.filter(
-          (r) => r.language?.toLowerCase() === language.toLowerCase(),
-        );
+        const canonicalLanguage = await resolveCanonicalLanguage(language);
+        if (!canonicalLanguage) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `No repositories found for language "${language}".`,
+              },
+            ],
+          };
+        }
+        results = results.filter((repo) => repo.language === canonicalLanguage);
       }
-      if (min_stars) {
-        results = results.filter((r) => (r.stargazers_count ?? 0) >= min_stars);
+
+      if (min_stars != null) {
+        results = results.filter((repo) => (repo.stargazers_count ?? 0) >= min_stars);
       }
 
       results = results.slice(0, limit);
@@ -112,29 +190,22 @@ server.tool(
         };
       }
 
-      const formatted = results.map((repo, i) => {
-        const similarity = ((repo.similarity ?? 0) * 100).toFixed(1);
-        return `${i + 1}. **${repo.full_name}** (${similarity}% match)
-   ⭐ ${repo.stargazers_count ?? 0} | 🍴 ${repo.forks_count ?? 0} | ${repo.language || "Unknown"}
-   ${repo.description || "No description"}
-   Topics: ${repo.topics?.join(", ") || "none"}
-   URL: ${repo.html_url}`;
-      });
-
       return {
         content: [
           {
             type: "text",
-            text: `Found ${results.length} matching repositories:\n\n${formatted.join("\n\n")}`,
+            text: `Found ${results.length} matching repositories:\n\n${results
+              .map((repo, index) => formatRepoLine(repo, index))
+              .join("\n\n")}`,
           },
         ],
       };
-    } catch (err) {
+    } catch (error) {
       return {
         content: [
           {
             type: "text",
-            text: `Error: ${err instanceof Error ? err.message : String(err)}`,
+            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
           },
         ],
       };
@@ -142,7 +213,6 @@ server.tool(
   },
 );
 
-// Tool: Get detailed repo information
 server.tool(
   "get_repo_details",
   "Get detailed information about a specific starred repository, including its README content.",
@@ -152,7 +222,7 @@ server.tool(
   async ({ full_name }) => {
     try {
       const { data: repo, error } = await supabase
-        .from("repos")
+        .from(STAR_VAULT_TABLES.repos)
         .select("*")
         .eq("full_name", full_name)
         .single();
@@ -168,38 +238,50 @@ server.tool(
         };
       }
 
-      const readme = repo.readme_content
-        ? `\n\n## README (excerpt)\n\n${repo.readme_content.slice(0, 3000)}${repo.readme_content.length > 3000 ? "..." : ""}`
+      const typedRepo = repo as RepoDetails;
+      const readme = typedRepo.readme_content
+        ? `\n\n## README (excerpt)\n\n${typedRepo.readme_content.slice(0, 3000)}${typedRepo.readme_content.length > 3000 ? "..." : ""}`
         : "";
 
-      const deps = repo.package_json?.dependencies
-        ? `\n\n## Dependencies\n${Object.keys(repo.package_json.dependencies).slice(0, 20).join(", ")}${Object.keys(repo.package_json.dependencies).length > 20 ? "..." : ""}`
-        : "";
+      const dependencies =
+        typedRepo.package_json &&
+        typeof typedRepo.package_json === "object" &&
+        typedRepo.package_json.dependencies &&
+        typeof typedRepo.package_json.dependencies === "object"
+          ? Object.keys(
+              typedRepo.package_json.dependencies as Record<string, string>,
+            )
+          : [];
+
+      const deps =
+        dependencies.length > 0
+          ? `\n\n## Dependencies\n${dependencies.slice(0, 20).join(", ")}${dependencies.length > 20 ? "..." : ""}`
+          : "";
 
       return {
         content: [
           {
             type: "text",
-            text: `# ${repo.full_name}
+            text: `# ${typedRepo.full_name}
 
-${repo.description || "No description"}
+${typedRepo.description || "No description"}
 
-**Language:** ${repo.language || "Unknown"}
-**Stars:** ${repo.stargazers_count ?? 0} | **Forks:** ${repo.forks_count ?? 0}
-**License:** ${repo.license || "Unknown"}
-**Topics:** ${repo.topics?.join(", ") || "none"}
+**Language:** ${typedRepo.language || "Unknown"}
+**Stars:** ${typedRepo.stargazers_count ?? "N/A"} | **Forks:** ${typedRepo.forks_count ?? "N/A"}
+**License:** ${typedRepo.license || "Unknown"}
+**Topics:** ${typedRepo.topics?.join(", ") || "none"}
 
-**URL:** ${repo.html_url}
-**Starred:** ${repo.starred_at ? new Date(repo.starred_at).toLocaleDateString() : "Unknown"}${readme}${deps}`,
+**URL:** ${typedRepo.html_url}
+**Starred:** ${typedRepo.starred_at ? new Date(typedRepo.starred_at).toLocaleDateString() : "Unknown"}${readme}${deps}`,
           },
         ],
       };
-    } catch (err) {
+    } catch (error) {
       return {
         content: [
           {
             type: "text",
-            text: `Error: ${err instanceof Error ? err.message : String(err)}`,
+            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
           },
         ],
       };
@@ -207,87 +289,73 @@ ${repo.description || "No description"}
   },
 );
 
-// Tool: Get statistics
-server.tool(
-  "get_stats",
-  "Get statistics about the starred repositories collection.",
-  {},
-  async () => {
-    try {
-      // Get total count
-      const { count: totalRepos } = await supabase
-        .from("repos")
-        .select("*", { count: "exact", head: true });
+server.tool("get_stats", "Get statistics about the starred repositories collection.", {}, async () => {
+  try {
+    const { count: totalRepos } = await supabase
+      .from(STAR_VAULT_TABLES.repos)
+      .select("*", { count: "exact", head: true });
 
-      // Get count with embeddings
-      const { count: withEmbeddings } = await supabase
-        .from("repos")
-        .select("*", { count: "exact", head: true })
-        .not("embedding", "is", null);
+    const { count: withEmbeddings } = await supabase
+      .from(STAR_VAULT_TABLES.repos)
+      .select("*", { count: "exact", head: true })
+      .not("embedding", "is", null);
 
-      // Get count with readme
-      const { count: withReadme } = await supabase
-        .from("repos")
-        .select("*", { count: "exact", head: true })
-        .not("readme_content", "is", null);
+    const { count: withReadme } = await supabase
+      .from(STAR_VAULT_TABLES.repos)
+      .select("*", { count: "exact", head: true })
+      .not("readme_content", "is", null);
 
-      // Get top languages
-      const { data: langData } = await supabase
-        .from("repos")
-        .select("language")
-        .not("language", "is", null);
+    const { data: langData } = await supabase
+      .from(STAR_VAULT_TABLES.repos)
+      .select("language")
+      .not("language", "is", null);
 
-      const langCounts: Record<string, number> = {};
-      langData?.forEach((r) => {
-        if (r.language) {
-          langCounts[r.language] = (langCounts[r.language] || 0) + 1;
-        }
-      });
-      const topLangs = Object.entries(langCounts)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 10)
-        .map(([lang, count]) => `${lang} (${count})`)
-        .join(", ");
+    const langCounts: Record<string, number> = {};
+    (langData ?? []).forEach((row) => {
+      const language = (row as { language?: string | null }).language;
+      if (language) langCounts[language] = (langCounts[language] ?? 0) + 1;
+    });
+    const topLangs = Object.entries(langCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([language, count]) => `${language} (${count})`)
+      .join(", ");
 
-      // Get last sync
-      const { data: syncData } = await supabase
-        .from("sync_state")
-        .select("last_sync_at")
-        .order("last_sync_at", { ascending: false })
-        .limit(1);
+    const { data: syncData } = await supabase
+      .from(STAR_VAULT_TABLES.syncState)
+      .select("last_sync_at")
+      .order("last_sync_at", { ascending: false })
+      .limit(1);
 
-      const lastSync = syncData?.[0]?.last_sync_at;
+    const lastSync = (syncData?.[0] as { last_sync_at?: string } | undefined)
+      ?.last_sync_at;
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: `# Star Vault Statistics
+    return {
+      content: [
+        {
+          type: "text",
+          text: `# Star Vault Statistics
 
 **Total Repositories:** ${totalRepos ?? 0}
 **With Embeddings:** ${withEmbeddings ?? 0}
 **With README:** ${withReadme ?? 0}
-
 **Top Languages:** ${topLangs || "N/A"}
-
 **Last Synced:** ${lastSync ? new Date(lastSync).toLocaleString() : "Never"}`,
-          },
-        ],
-      };
-    } catch (err) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error: ${err instanceof Error ? err.message : String(err)}`,
-          },
-        ],
-      };
-    }
-  },
-);
+        },
+      ],
+    };
+  } catch (error) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
+    };
+  }
+});
 
-// Tool: List repos by language
 server.tool(
   "list_by_language",
   "List starred repositories filtered by programming language.",
@@ -306,6 +374,15 @@ server.tool(
   },
   async ({ language, limit = 20, sort_by = "stars" }) => {
     try {
+      const canonicalLanguage = await resolveCanonicalLanguage(language);
+      if (!canonicalLanguage) {
+        return {
+          content: [
+            { type: "text", text: `No ${language} repositories found.` },
+          ],
+        };
+      }
+
       const sortColumn =
         sort_by === "stars"
           ? "stargazers_count"
@@ -314,16 +391,15 @@ server.tool(
             : "starred_at";
 
       const { data, error } = await supabase
-        .from("repos")
+        .from(STAR_VAULT_TABLES.repos)
         .select(
-          "full_name, description, stargazers_count, forks_count, html_url",
+          "full_name, description, stargazers_count, forks_count, html_url, language",
         )
-        .ilike("language", language)
+        .eq("language", canonicalLanguage)
         .order(sortColumn, { ascending: false })
         .limit(limit);
 
       if (error) throw error;
-
       if (!data || data.length === 0) {
         return {
           content: [
@@ -332,25 +408,34 @@ server.tool(
         };
       }
 
-      const results = data.map((repo, i) => {
-        return `${i + 1}. **${repo.full_name}** ⭐ ${repo.stargazers_count ?? 0}
-   ${repo.description || "No description"}`;
+      const lines = data.map((repo, index) => {
+        const typed = repo as {
+          full_name: string;
+          description?: string | null;
+          stargazers_count?: number | null;
+          forks_count?: number | null;
+          html_url: string;
+        };
+        return `${index + 1}. **${typed.full_name}**
+   ⭐ ${typed.stargazers_count ?? "N/A"} | 🍴 ${typed.forks_count ?? "N/A"}
+   ${typed.description || "No description"}
+   ${typed.html_url}`;
       });
 
       return {
         content: [
           {
             type: "text",
-            text: `Found ${data.length} ${language} repositories:\n\n${results.join("\n\n")}`,
+            text: `Found ${data.length} ${canonicalLanguage} repositories:\n\n${lines.join("\n\n")}`,
           },
         ],
       };
-    } catch (err) {
+    } catch (error) {
       return {
         content: [
           {
             type: "text",
-            text: `Error: ${err instanceof Error ? err.message : String(err)}`,
+            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
           },
         ],
       };
@@ -358,7 +443,6 @@ server.tool(
   },
 );
 
-// Tool: Find similar repos
 server.tool(
   "find_similar",
   "Find repositories similar to a given one based on semantic similarity.",
@@ -375,9 +459,8 @@ server.tool(
   },
   async ({ full_name, limit = 5 }) => {
     try {
-      // Get the source repo's embedding
       const { data: sourceRepo, error: sourceError } = await supabase
-        .from("repos")
+        .from(STAR_VAULT_TABLES.repos)
         .select("embedding")
         .eq("full_name", full_name)
         .single();
@@ -393,18 +476,16 @@ server.tool(
         };
       }
 
-      // Search for similar repos using the embedding
-      const { data, error } = await supabase.rpc("search_repos", {
+      const { data, error } = await supabase.rpc(STAR_VAULT_RPC.searchRepos, {
         query_embedding: JSON.stringify(sourceRepo.embedding),
         match_threshold: 0.5,
-        match_count: limit + 1, // +1 to exclude the source repo
+        match_count: limit + 1,
       });
 
       if (error) throw error;
 
-      // Filter out the source repo
-      const similar = (data || [])
-        .filter((r: SearchResult) => r.full_name !== full_name)
+      const similar = ((data ?? []) as SearchRepoRow[])
+        .filter((repo) => repo.full_name !== full_name)
         .slice(0, limit);
 
       if (similar.length === 0) {
@@ -413,10 +494,10 @@ server.tool(
         };
       }
 
-      const results = similar.map((repo: SearchResult, i: number) => {
+      const lines = similar.map((repo, index) => {
         const similarity = ((repo.similarity ?? 0) * 100).toFixed(1);
-        return `${i + 1}. **${repo.full_name}** (${similarity}% similar)
-   ⭐ ${repo.stargazers_count ?? 0} | ${repo.language || "Unknown"}
+        return `${index + 1}. **${repo.full_name}** (${similarity}% similar)
+   ${repo.language || "Unknown"}
    ${repo.description || "No description"}`;
       });
 
@@ -424,16 +505,16 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Repositories similar to ${full_name}:\n\n${results.join("\n\n")}`,
+            text: `Repositories similar to ${full_name}:\n\n${lines.join("\n\n")}`,
           },
         ],
       };
-    } catch (err) {
+    } catch (error) {
       return {
         content: [
           {
             type: "text",
-            text: `Error: ${err instanceof Error ? err.message : String(err)}`,
+            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
           },
         ],
       };
@@ -441,11 +522,16 @@ server.tool(
   },
 );
 
-// Start the server
-async function main() {
+async function main(): Promise<void> {
+  await verifyBackendReadiness();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Star Vault MCP Server v2.0.0 (Supabase) running on stdio");
+  console.error(
+    `Star Vault MCP Server v2.1.0 (${STAR_VAULT_SCHEMA} schema) running on stdio`,
+  );
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error("Failed to start Star Vault MCP server:", error);
+  process.exit(1);
+});
