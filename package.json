@@ -9,9 +9,15 @@
     "fetch-content": "bun run src/index.ts fetch-content",
     "embeddings": "bun run src/index.ts embeddings",
     "sync": "bun run src/index.ts sync",
+    "reconcile": "bun run src/index.ts reconcile",
+    "verify": "bun run src/index.ts verify",
     "stats": "bun run src/index.ts stats",
     "mcp": "bun run mcp-server/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "deploy:cron": "supabase functions deploy sync-stars sync-content sync-embeddings sync-reconcile",
+    "deploy:gpt": "supabase functions deploy sync-embeddings",
+    "deploy:util": "supabase functions deploy sync-stars sync-content sync-reconcile"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

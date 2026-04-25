@@ -1,8 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { createClient } from "@supabase/supabase-js";
-import OpenAI from "openai";
 import {
-  EMBEDDING_MODEL,
   STAR_VAULT_SCHEMA,
   STAR_VAULT_TABLES,
   type ErrorBucket,
@@ -10,7 +8,7 @@ import {
 import { fetchRepoContent } from "../github/content.js";
 import { fetchAllStarredRepos } from "../github/starred.js";
 import { runWithConcurrency } from "./async.js";
-import { classifyError, withRetry } from "./retry.js";
+import { classifyError } from "./retry.js";
 
 export interface Repo {
   id?: number;
@@ -59,6 +57,9 @@ export interface SyncResult {
   repos_updated: number;
   content_fetched: number;
   embeddings_generated: number;
+  pages_walked: number;
+  pages_304: number;
+  completed_walk: boolean;
   errors: string[];
   error_summary: Record<ErrorBucket, number>;
   phase_durations_ms: {
@@ -77,10 +78,11 @@ export interface SyncOptions {
   maxPages?: number;
   contentConcurrency?: number;
   embeddingConcurrency?: number;
+  /** Use ETag-cached requests to /user/starred. Default true. Disable for reconcile. */
+  useEtags?: boolean;
 }
 
 type RepoStatsRow = { language: string | null };
-type RepoIdRow = { github_id: number };
 
 let supabaseClient: any = null;
 
@@ -94,49 +96,10 @@ function createErrorSummary(): Record<ErrorBucket, number> {
   };
 }
 
-function addSyncError(
-  result: SyncResult,
-  label: string,
-  error: unknown,
-): void {
+function addSyncError(result: SyncResult, label: string, error: unknown): void {
   const message = `${label}: ${error instanceof Error ? error.message : String(error)}`;
   result.errors.push(message);
   result.error_summary[classifyError(error)] += 1;
-}
-
-function buildEmbeddingText(repo: Repo): string {
-  const parts: string[] = [repo.full_name];
-  if (repo.description) parts.push(repo.description);
-
-  const metadata: string[] = [];
-  if (repo.language) metadata.push(`Language: ${repo.language}`);
-  if (repo.topics?.length) metadata.push(`Topics: ${repo.topics.join(", ")}`);
-  if (repo.stargazers_count != null)
-    metadata.push(`Stars: ${repo.stargazers_count}`);
-  if (repo.forks_count != null) metadata.push(`Forks: ${repo.forks_count}`);
-  if (repo.license) metadata.push(`License: ${repo.license}`);
-  if (metadata.length > 0) parts.push(metadata.join(" | "));
-
-  if (repo.readme_content) {
-    parts.push(repo.readme_content.slice(0, 2000));
-  }
-
-  const pkg = repo.package_json;
-  if (pkg && typeof pkg === "object") {
-    const dependencies = pkg.dependencies as Record<string, string> | undefined;
-    const devDependencies = pkg.devDependencies as
-      | Record<string, string>
-      | undefined;
-    const depNames = [
-      ...Object.keys(dependencies ?? {}),
-      ...Object.keys(devDependencies ?? {}),
-    ];
-    if (depNames.length > 0) {
-      parts.push(`Dependencies: ${depNames.slice(0, 80).join(", ")}`);
-    }
-  }
-
-  return parts.join("\n");
 }
 
 function chunkArray<T>(items: T[], size: number): T[][] {
@@ -168,52 +131,47 @@ export function getSupabaseClient(): any {
 
 export async function upsertRepos(
   repos: Repo[],
+  runId?: number,
 ): Promise<{ added: number; updated: number }> {
   if (repos.length === 0) return { added: 0, updated: 0 };
 
   const supabase = getSupabaseClient();
-  const now = new Date().toISOString();
-  const githubIds = [...new Set(repos.map((repo) => repo.github_id))];
-  const existingIds = new Set<number>();
+  let added = 0;
+  let updated = 0;
 
-  for (const chunk of chunkArray(githubIds, 500)) {
-    const { data, error } = await supabase
-      .from(STAR_VAULT_TABLES.repos)
-      .select("github_id")
-      .in("github_id", chunk);
+  // Chunk to avoid massive single payloads. Server uses xmax=0 to count
+  // inserts vs updates in a single round-trip per chunk.
+  for (const chunk of chunkArray(repos, 500)) {
+    const payload = chunk.map((repo) => ({
+      github_id: repo.github_id,
+      full_name: repo.full_name,
+      owner: repo.owner,
+      name: repo.name,
+      description: repo.description ?? null,
+      topics: repo.topics ?? [],
+      language: repo.language ?? null,
+      stargazers_count: repo.stargazers_count ?? null,
+      forks_count: repo.forks_count ?? null,
+      license: repo.license ?? null,
+      html_url: repo.html_url,
+      default_branch: repo.default_branch ?? "main",
+      starred_at: repo.starred_at ?? null,
+      raw_data: repo.raw_data ?? null,
+    }));
+
+    const { data, error } = await supabase.rpc("upsert_repos", {
+      payload,
+      run_id: runId ?? null,
+    });
 
     if (error) throw error;
-    for (const row of (data ?? []) as RepoIdRow[]) {
-      existingIds.add(row.github_id);
-    }
+
+    const row = Array.isArray(data) ? data[0] : data;
+    added += Number(row?.added ?? 0);
+    updated += Number(row?.updated ?? 0);
   }
 
-  const rows = repos.map((repo) => ({
-    github_id: repo.github_id,
-    full_name: repo.full_name,
-    owner: repo.owner,
-    name: repo.name,
-    description: repo.description,
-    topics: repo.topics,
-    language: repo.language,
-    stargazers_count: repo.stargazers_count,
-    forks_count: repo.forks_count,
-    license: repo.license,
-    html_url: repo.html_url,
-    default_branch: repo.default_branch,
-    starred_at: repo.starred_at,
-    raw_data: repo.raw_data,
-    fetched_at: now,
-  }));
-
-  const { error } = await supabase
-    .from(STAR_VAULT_TABLES.repos)
-    .upsert(rows, { onConflict: "github_id" });
-
-  if (error) throw error;
-
-  const updated = repos.filter((repo) => existingIds.has(repo.github_id)).length;
-  return { added: repos.length - updated, updated };
+  return { added, updated };
 }
 
 export async function recordSync(state: SyncStateInput): Promise<void> {
@@ -277,8 +235,9 @@ export async function getStats(): Promise<VaultStats> {
     with_embeddings: withEmbeddings ?? 0,
     with_readme: withReadme ?? 0,
     top_languages: topLangs,
-    last_sync: (syncData?.[0] as { last_sync_at?: string } | undefined)
-      ?.last_sync_at ?? null,
+    last_sync:
+      (syncData?.[0] as { last_sync_at?: string } | undefined)?.last_sync_at ??
+      null,
   };
 }
 
@@ -358,7 +317,8 @@ export async function getAllRepos(): Promise<Repo[]> {
 export async function syncStarVault(args?: SyncOptions): Promise<SyncResult> {
   const syncStartedAt = Date.now();
   const contentConcurrency = args?.contentConcurrency ?? 8;
-  const embeddingConcurrency = args?.embeddingConcurrency ?? 4;
+  // embeddingConcurrency from SyncOptions is now a no-op: batched embeddings
+  // parallelize inside a single API call. Kept on the type for CLI compat.
   const contentLimit = args?.contentLimit ?? 0;
   const embeddingLimit = args?.embeddingLimit ?? 0;
 
@@ -368,6 +328,9 @@ export async function syncStarVault(args?: SyncOptions): Promise<SyncResult> {
     repos_updated: 0,
     content_fetched: 0,
     embeddings_generated: 0,
+    pages_walked: 0,
+    pages_304: 0,
+    completed_walk: false,
     errors: [],
     error_summary: createErrorSummary(),
     phase_durations_ms: {
@@ -382,11 +345,19 @@ export async function syncStarVault(args?: SyncOptions): Promise<SyncResult> {
     const reposPhaseStart = Date.now();
     try {
       console.log("  Fetching starred repos from GitHub...");
-      const starredRepos = await fetchAllStarredRepos({
+      const fetchResult = await fetchAllStarredRepos({
         maxPages: args.maxPages,
+        useEtags: args.useEtags ?? true,
         onProgress: (count) => console.log(`    Fetched ${count} repos...`),
       });
+      const starredRepos = fetchResult.repos;
       result.repos_fetched = starredRepos.length;
+      result.pages_walked = fetchResult.pages_walked;
+      result.pages_304 = fetchResult.pages_304;
+      result.completed_walk = fetchResult.completed_walk;
+      console.log(
+        `    ${fetchResult.pages_walked} pages walked (${fetchResult.pages_304} × 304 Not Modified)`,
+      );
 
       const repos: Repo[] = starredRepos.map((repo) => ({
         github_id: repo.github_id,
@@ -434,11 +405,19 @@ export async function syncStarVault(args?: SyncOptions): Promise<SyncResult> {
               repo.default_branch ?? "main",
             );
 
-            await updateRepoContent(repo.github_id, {
-              readme_content: content.readme ?? undefined,
-              package_json: content.packageJson ?? undefined,
-            });
+            // fetchReadme returns null on 304/404. Don't overwrite an
+            // existing readme_content with null — only write when we have
+            // fresh bytes. 404 will cache a null-body entry in github_etags
+            // so we don't re-ask on every sync.
+            const patch: {
+              readme_content?: string;
+              package_json?: Record<string, unknown>;
+            } = {};
+            if (content.readme !== null) patch.readme_content = content.readme;
+            if (content.packageJson !== null)
+              patch.package_json = content.packageJson;
 
+            await updateRepoContent(repo.github_id, patch);
             result.content_fetched += 1;
           } catch (error) {
             addSyncError(result, `Content ${repo.full_name}`, error);
@@ -460,36 +439,16 @@ export async function syncStarVault(args?: SyncOptions): Promise<SyncResult> {
       }
 
       console.log(
-        `  Generating embeddings for up to ${embeddingLimit} repos (concurrency ${embeddingConcurrency})...`,
+        `  Generating embeddings for up to ${embeddingLimit} repos (batched)...`,
       );
-      const openai = new OpenAI({
-        apiKey: process.env.OPENAI_API_KEY,
-        maxRetries: 2,
-        timeout: 30_000,
+      const { generateEmbeddingsBatch } = await import("../sync/embeddings.js");
+      const emb = await generateEmbeddingsBatch({
+        limit: embeddingLimit,
+        openaiApiKey: process.env.OPENAI_API_KEY,
       });
-      const reposNeedingEmbeddings =
-        await getReposWithoutEmbeddings(embeddingLimit);
-
-      await runWithConcurrency(
-        reposNeedingEmbeddings,
-        embeddingConcurrency,
-        async (repo) => {
-          try {
-            const text = buildEmbeddingText(repo);
-            const response = await withRetry(
-              () =>
-                openai.embeddings.create({
-                  model: EMBEDDING_MODEL,
-                  input: text,
-                }),
-              { maxAttempts: 3, baseDelayMs: 500 },
-            );
-            await updateRepoEmbedding(repo.github_id, response.data[0].embedding);
-            result.embeddings_generated += 1;
-          } catch (error) {
-            addSyncError(result, `Embedding ${repo.full_name}`, error);
-          }
-        },
+      result.embeddings_generated = emb.embeddings_generated;
+      console.log(
+        `    Scanned ${emb.repos_scanned}, skipped ${emb.repos_skipped_unchanged} unchanged, generated ${emb.embeddings_generated} in ${emb.batches} batch call(s)`,
       );
     } catch (error) {
       addSyncError(result, "Generate embeddings", error);

@@ -5,11 +5,9 @@
  */
 
 import { config } from "dotenv";
-import {
-  getStats,
-  syncStarVault,
-  type SyncOptions,
-} from "./utils/supabase.js";
+import { getStats, syncStarVault, type SyncOptions } from "./utils/supabase.js";
+import { runReconcile } from "./sync/reconcile.js";
+import { runVerify } from "./sync/verify.js";
 
 config({ override: true });
 
@@ -60,11 +58,24 @@ function getSyncOptions(base: SyncOptions, flags: CliFlags): SyncOptions {
   };
 }
 
-function printSyncDetails(result: Awaited<ReturnType<typeof syncStarVault>>): void {
+function printSyncDetails(
+  result: Awaited<ReturnType<typeof syncStarVault>>,
+): void {
   console.log("Durations (ms):", result.phase_durations_ms);
   if (result.errors.length > 0) {
     console.log("Error summary:", result.error_summary);
     console.log(`Errors captured: ${result.errors.length}`);
+    for (const error of result.errors) {
+      console.log(`  - ${error}`);
+    }
+  }
+}
+
+function failIfSyncHadErrors(
+  result: Awaited<ReturnType<typeof syncStarVault>>,
+): void {
+  if (result.errors.length > 0) {
+    throw new Error(`Sync completed with ${result.errors.length} error(s)`);
   }
 }
 
@@ -86,6 +97,7 @@ async function importStarredRepos(flags: CliFlags): Promise<void> {
     `✅ Fetched ${result.repos_fetched} repos (added ${result.repos_added}, updated ${result.repos_updated})\n`,
   );
   printSyncDetails(result);
+  failIfSyncHadErrors(result);
 }
 
 async function fetchContent(flags: CliFlags): Promise<void> {
@@ -104,6 +116,7 @@ async function fetchContent(flags: CliFlags): Promise<void> {
 
   console.log(`✅ Content fetched: ${result.content_fetched}\n`);
   printSyncDetails(result);
+  failIfSyncHadErrors(result);
 }
 
 async function processEmbeddings(flags: CliFlags): Promise<void> {
@@ -122,6 +135,7 @@ async function processEmbeddings(flags: CliFlags): Promise<void> {
 
   console.log(`✅ Embeddings generated: ${result.embeddings_generated}\n`);
   printSyncDetails(result);
+  failIfSyncHadErrors(result);
 }
 
 async function fullSync(flags: CliFlags): Promise<void> {
@@ -142,6 +156,43 @@ async function fullSync(flags: CliFlags): Promise<void> {
     `✅ Sync complete (added ${result.repos_added}, updated ${result.repos_updated}, content ${result.content_fetched}, embeddings ${result.embeddings_generated})\n`,
   );
   printSyncDetails(result);
+  failIfSyncHadErrors(result);
+}
+
+async function reconcile(): Promise<void> {
+  console.log("🔍 Running authoritative reconcile (no ETags, full walk)...\n");
+  const result = await runReconcile();
+  console.log(
+    `✅ Run #${result.run_id}: ${result.repos_seen} seen, ${result.existing_repo_count} existing, walked ${result.pages_walked} pages (${result.pages_304} × 304)`,
+  );
+  if (result.safety_ok) {
+    console.log(`   Hard-deleted ${result.repos_deleted} unseen repos.`);
+  } else {
+    console.log(
+      `   DELETE skipped: ${result.reason_skipped ?? "safety gate returned false"}`,
+    );
+    console.log(
+      `   (Implement isSafeToReconcile in src/sync/reconcile.ts to enable deletions.)`,
+    );
+  }
+}
+
+async function verify(): Promise<void> {
+  console.log("🩺 Verifying star_vault schema and RPCs...\n");
+  const { ok, results } = await runVerify();
+  for (const r of results) {
+    const mark = r.ok ? "✅" : "❌";
+    const detail = r.detail ? `  — ${r.detail}` : "";
+    console.log(`  ${mark} ${r.name}${detail}`);
+  }
+  console.log();
+  if (!ok) {
+    console.log(
+      "Some checks failed. See supabase/migrations/REPAIR.md and apply any missing migrations.",
+    );
+    process.exit(1);
+  }
+  console.log("All checks passed.");
 }
 
 async function showStats(): Promise<void> {
@@ -165,31 +216,47 @@ async function showStats(): Promise<void> {
 const command = process.argv[2];
 const flags = parseFlags();
 
+function runCommand(commandPromise: Promise<void>): void {
+  commandPromise.catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}
+
 switch (command) {
   case "import":
-    importStarredRepos(flags).catch(console.error);
+    runCommand(importStarredRepos(flags));
     break;
   case "fetch-content":
-    fetchContent(flags).catch(console.error);
+    runCommand(fetchContent(flags));
     break;
   case "embeddings":
-    processEmbeddings(flags).catch(console.error);
+    runCommand(processEmbeddings(flags));
     break;
   case "sync":
-    fullSync(flags).catch(console.error);
+    runCommand(fullSync(flags));
     break;
   case "stats":
-    showStats().catch(console.error);
+    runCommand(showStats());
+    break;
+  case "reconcile":
+    runCommand(reconcile());
+    break;
+  case "verify":
+    runCommand(verify());
     break;
   default:
     console.log(`
 Star Vault CLI - GitHub Starred Repos Intelligence
 
 Usage:
-  bun run import         Fetch starred repos from GitHub
+  bun run import         Fetch starred repos from GitHub (ETag-cached)
   bun run fetch-content  Fetch README/package.json content
   bun run embeddings     Generate embeddings
-  bun run sync           Run full sync
+  bun run sync           Run full sync (ETag-cached)
+  bun run reconcile      Authoritative walk (no ETags); hard-deletes unstarred
+                         repos when isSafeToReconcile() returns true
+  bun run verify         Smoke-test DB schema + RPCs (read-only, no API calls)
   bun run stats          Show database statistics
 
 Optional flags:

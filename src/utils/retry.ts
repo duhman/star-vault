@@ -115,7 +115,10 @@ export function classifyError(error: unknown): ErrorBucket {
   if (
     message.includes("invalid") ||
     message.includes("validation") ||
-    message.includes("parse")
+    message.includes("parse") ||
+    message.includes("401") ||
+    message.includes("unauthorized") ||
+    message.includes("incorrect api key")
   ) {
     return "validation";
   }

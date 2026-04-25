@@ -1,0 +1,82 @@
+[
+  {
+    "name": "minimal",
+    "repo": {
+      "full_name": "alice/tiny-lib",
+      "description": null,
+      "language": null,
+      "topics": null,
+      "license": null,
+      "stargazers_count": null,
+      "forks_count": null,
+      "readme_content": null,
+      "package_json": null
+    }
+  },
+  {
+    "name": "description-only",
+    "repo": {
+      "full_name": "bob/hello",
+      "description": "A hello world demo",
+      "language": null,
+      "topics": [],
+      "license": null,
+      "stargazers_count": 0,
+      "forks_count": 0,
+      "readme_content": null,
+      "package_json": null
+    }
+  },
+  {
+    "name": "full-js-repo",
+    "repo": {
+      "full_name": "vercel/next.js",
+      "description": "The React Framework",
+      "language": "JavaScript",
+      "topics": ["react", "nextjs", "ssr", "jamstack"],
+      "license": "MIT",
+      "stargazers_count": 120000,
+      "forks_count": 26000,
+      "readme_content": "# Next.js\n\n<!-- badge comment -->\n![badge](https://img.shields.io/npm/v/next)\n\n<p>HTML tag content</p>\n\nNext.js is a React framework for production.\n\n\n\n\nMultiple blank lines above.",
+      "package_json": {
+        "dependencies": {
+          "react": "^18.0.0",
+          "react-dom": "^18.0.0",
+          "webpack": "^5.0.0"
+        },
+        "devDependencies": {
+          "typescript": "^5.0.0",
+          "jest": "^29.0.0"
+        }
+      }
+    }
+  },
+  {
+    "name": "readme-without-package-json",
+    "repo": {
+      "full_name": "rust-lang/rust",
+      "description": "Empowering everyone to build reliable and efficient software.",
+      "language": "Rust",
+      "topics": ["rust", "compiler", "language"],
+      "license": "Apache-2.0",
+      "stargazers_count": 90000,
+      "forks_count": 11000,
+      "readme_content": "The Rust Programming Language\n\nThis is the main source code repository for Rust.",
+      "package_json": null
+    }
+  },
+  {
+    "name": "unicode-and-special-chars",
+    "repo": {
+      "full_name": "日本語/テスト",
+      "description": "Emoji: 🚀 and accented chars: café naïve",
+      "language": "Python",
+      "topics": ["日本語", "unicode-test"],
+      "license": "MIT",
+      "stargazers_count": 42,
+      "forks_count": 7,
+      "readme_content": "# タイトル\n\nUnicode: 你好世界\n\n```python\nprint('hello 世界')\n```",
+      "package_json": null
+    }
+  }
+]

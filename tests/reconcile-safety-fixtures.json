@@ -1,0 +1,146 @@
+[
+  {
+    "name": "happy-path-full-walk",
+    "run": {
+      "id": 1,
+      "completed_walk": true,
+      "pages_walked": 8,
+      "pages_304": 0,
+      "repos_seen": 798,
+      "existing_repo_count": 798
+    },
+    "expected": true
+  },
+  {
+    "name": "small-drop-under-threshold",
+    "run": {
+      "id": 2,
+      "completed_walk": true,
+      "pages_walked": 8,
+      "pages_304": 0,
+      "repos_seen": 794,
+      "existing_repo_count": 798
+    },
+    "expected": true
+  },
+  {
+    "name": "drop-10-percent-well-under-25",
+    "run": {
+      "id": 3,
+      "completed_walk": true,
+      "pages_walked": 8,
+      "pages_304": 0,
+      "repos_seen": 720,
+      "existing_repo_count": 800
+    },
+    "expected": true
+  },
+  {
+    "name": "drop-12-5-percent-under-new-threshold",
+    "run": {
+      "id": 4,
+      "completed_walk": true,
+      "pages_walked": 8,
+      "pages_304": 0,
+      "repos_seen": 700,
+      "existing_repo_count": 800
+    },
+    "expected": true
+  },
+  {
+    "name": "drop-exactly-25-percent-boundary",
+    "run": {
+      "id": 5,
+      "completed_walk": true,
+      "pages_walked": 8,
+      "pages_304": 0,
+      "repos_seen": 600,
+      "existing_repo_count": 800
+    },
+    "expected": true
+  },
+  {
+    "name": "drop-just-over-25-percent",
+    "run": {
+      "id": 6,
+      "completed_walk": true,
+      "pages_walked": 8,
+      "pages_304": 0,
+      "repos_seen": 599,
+      "existing_repo_count": 800
+    },
+    "expected": false
+  },
+  {
+    "name": "drop-well-over-25-percent",
+    "run": {
+      "id": 7,
+      "completed_walk": true,
+      "pages_walked": 8,
+      "pages_304": 0,
+      "repos_seen": 400,
+      "existing_repo_count": 800
+    },
+    "expected": false
+  },
+  {
+    "name": "incomplete-walk",
+    "run": {
+      "id": 8,
+      "completed_walk": false,
+      "pages_walked": 3,
+      "pages_304": 0,
+      "repos_seen": 300,
+      "existing_repo_count": 800
+    },
+    "expected": false
+  },
+  {
+    "name": "etag-used-by-mistake",
+    "run": {
+      "id": 9,
+      "completed_walk": true,
+      "pages_walked": 8,
+      "pages_304": 1,
+      "repos_seen": 700,
+      "existing_repo_count": 800
+    },
+    "expected": false
+  },
+  {
+    "name": "zero-repos-seen",
+    "run": {
+      "id": 10,
+      "completed_walk": true,
+      "pages_walked": 1,
+      "pages_304": 0,
+      "repos_seen": 0,
+      "existing_repo_count": 800
+    },
+    "expected": false
+  },
+  {
+    "name": "tiny-vault-big-drop-still-safe",
+    "run": {
+      "id": 11,
+      "completed_walk": true,
+      "pages_walked": 1,
+      "pages_304": 0,
+      "repos_seen": 5,
+      "existing_repo_count": 40
+    },
+    "expected": true
+  },
+  {
+    "name": "empty-vault-first-sync",
+    "run": {
+      "id": 12,
+      "completed_walk": true,
+      "pages_walked": 1,
+      "pages_304": 0,
+      "repos_seen": 10,
+      "existing_repo_count": 0
+    },
+    "expected": true
+  }
+]

@@ -18,28 +18,42 @@ export class GitHubClient {
   }
 
   /**
-   * Make an authenticated request to the GitHub API
+   * Make an authenticated request to the GitHub API.
+   *
+   * Throws on non-2xx responses EXCEPT 304 Not Modified, which is returned
+   * as `{ notModified: true, headers }` so callers can use ETag caching.
    */
   async request<T>(
     endpoint: string,
     options: RequestInit = {},
-  ): Promise<{ data: T; headers: Headers }> {
+  ): Promise<
+    | { data: T; headers: Headers; notModified?: false }
+    | { data: null; headers: Headers; notModified: true }
+  > {
     const url = endpoint.startsWith("http")
       ? endpoint
       : `${GITHUB_API_BASE}${endpoint}`;
 
-    const response = await fetchWithRetry(url, {
-      ...options,
-      headers: {
-        Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${this.token}`,
-        "X-GitHub-Api-Version": "2022-11-28",
-        ...options.headers,
+    const response = await fetchWithRetry(
+      url,
+      {
+        ...options,
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${this.token}`,
+          "X-GitHub-Api-Version": "2022-11-28",
+          ...options.headers,
+        },
       },
-    }, {
-      maxAttempts: 3,
-      baseDelayMs: 500,
-    });
+      {
+        maxAttempts: 3,
+        baseDelayMs: 500,
+      },
+    );
+
+    if (response.status === 304) {
+      return { data: null, headers: response.headers, notModified: true };
+    }
 
     if (!response.ok) {
       const error = await response.text();
@@ -83,14 +97,17 @@ export class GitHubClient {
     remaining: number;
     reset: Date;
   }> {
-    const { data } = await this.request<{
+    const response = await this.request<{
       rate: { limit: number; remaining: number; reset: number };
     }>("/rate_limit");
+    if (response.notModified) {
+      throw new Error("Unexpected 304 on /rate_limit");
+    }
 
     return {
-      limit: data.rate.limit,
-      remaining: data.rate.remaining,
-      reset: new Date(data.rate.reset * 1000),
+      limit: response.data.rate.limit,
+      remaining: response.data.rate.remaining,
+      reset: new Date(response.data.rate.reset * 1000),
     };
   }
 }

@@ -1,32 +1,46 @@
 #!/bin/bash
-# Deploy star-vault-sync Edge Function to self-hosted Supabase
+# Deploy the star-vault Edge Functions to a self-hosted Supabase.
 #
-# Prerequisites:
-# - SSH access to srv1209224.hstgr.cloud
-# - Supabase running in Docker
+# If you're on Supabase cloud, prefer:
+#   supabase functions deploy sync-stars
+#   supabase functions deploy sync-content
+#   supabase functions deploy sync-embeddings
+#   supabase functions deploy sync-reconcile
+#
+# This script handles the self-hosted case (scp + docker compose restart).
+#
+# Prereqs:
+# - SSH access to ${SERVER}
+# - Supabase running in Docker at ${REMOTE_SUPABASE_DIR}
 #
 # Usage: ./scripts/deploy-edge-function.sh
+#        ./scripts/deploy-edge-function.sh sync-stars   # deploy one
 
-set -e
+set -euo pipefail
 
-SERVER="srv1209224.hstgr.cloud"
-FUNCTION_NAME="star-vault-sync"
-LOCAL_PATH="supabase/functions/${FUNCTION_NAME}"
-REMOTE_PATH="/root/supabase/volumes/functions/${FUNCTION_NAME}"
+SERVER="${SERVER:-srv1209224.hstgr.cloud}"
+REMOTE_SUPABASE_DIR="${REMOTE_SUPABASE_DIR:-/root/supabase}"
+REMOTE_FUNCTIONS_DIR="${REMOTE_SUPABASE_DIR}/volumes/functions"
 
-echo "Deploying ${FUNCTION_NAME} to ${SERVER}..."
+ALL_FUNCTIONS=(sync-stars sync-content sync-embeddings sync-reconcile)
+TARGETS=("${@:-${ALL_FUNCTIONS[@]}}")
 
-# Copy function files to server
-scp -r ${LOCAL_PATH} root@${SERVER}:${REMOTE_PATH}
+echo "Deploying to ${SERVER}: ${TARGETS[*]}"
 
-echo "Function files copied. Restarting edge-runtime..."
+# _shared is imported by all functions; always ship it.
+scp -r supabase/functions/_shared root@${SERVER}:${REMOTE_FUNCTIONS_DIR}/
 
-# Restart the edge-functions container to pick up new function
-ssh root@${SERVER} "cd /root/supabase && docker compose restart functions"
+for fn in "${TARGETS[@]}"; do
+  echo "  → ${fn}"
+  scp -r supabase/functions/${fn} root@${SERVER}:${REMOTE_FUNCTIONS_DIR}/
+done
 
-echo "Deployment complete!"
+echo "Restarting edge-runtime..."
+ssh root@${SERVER} "cd ${REMOTE_SUPABASE_DIR} && docker compose restart functions"
+
 echo ""
-echo "Test with:"
-echo "curl -X POST https://${SERVER}/functions/v1/${FUNCTION_NAME} \\"
-echo "  -H 'Authorization: Bearer YOUR_SERVICE_ROLE_KEY' \\"
-echo "  -H 'Content-Type: application/json'"
+echo "Deployment complete. Smoke test:"
+for fn in "${TARGETS[@]}"; do
+  echo "  curl -X POST https://${SERVER}/functions/v1/${fn} \\"
+  echo "    -H 'Authorization: Bearer \$SUPABASE_SERVICE_ROLE_KEY'"
+done
