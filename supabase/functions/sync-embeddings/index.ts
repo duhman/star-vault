@@ -9,6 +9,7 @@ import {
   EMBEDDING_BATCH_SIZE,
   EMBEDDING_DIMENSIONS,
   EMBEDDING_MODEL,
+  GEMINI_EMBEDDING_MODEL,
   REPOS_TABLE,
   STAR_VAULT_SCHEMA,
   SYNC_RUNS_TABLE,
@@ -25,21 +26,81 @@ const cors = {
     "authorization, x-client-info, apikey, content-type",
 };
 
+type EmbeddingProvider = {
+  name: string;
+  model: string;
+  embed(inputs: string[]): Promise<number[][]>;
+};
+
+function createEmbeddingProvider(openaiKey: string | null, geminiKey: string | null): EmbeddingProvider | null {
+  if (geminiKey) {
+    return {
+      name: "gemini",
+      model: GEMINI_EMBEDDING_MODEL,
+      async embed(inputs: string[]) {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EMBEDDING_MODEL}:batchEmbedContents?key=${geminiKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              requests: inputs.map((input) => ({
+                model: `models/${GEMINI_EMBEDDING_MODEL}`,
+                content: { parts: [{ text: input }] },
+                outputDimensionality: EMBEDDING_DIMENSIONS,
+              })),
+            }),
+          },
+        );
+        if (!response.ok) {
+          const body = await response.text();
+          throw new Error(`Gemini embedding API error: ${body.slice(0, 500)}`);
+        }
+        const body = await response.json();
+        const embeddings = (body.embeddings ?? []).map((item: { values?: number[] }) => item.values ?? []);
+        if (embeddings.length !== inputs.length) {
+          throw new Error(`Gemini returned ${embeddings.length} vectors for ${inputs.length} inputs`);
+        }
+        return embeddings;
+      },
+    };
+  }
+
+  if (openaiKey) {
+    const openai = new OpenAI({
+      apiKey: openaiKey,
+      maxRetries: 5,
+      timeout: 60_000,
+    });
+    return {
+      name: "openai",
+      model: EMBEDDING_MODEL,
+      async embed(inputs: string[]) {
+        const response = await openai.embeddings.create({
+          model: EMBEDDING_MODEL,
+          input: inputs,
+          encoding_format: "float",
+        });
+        return response.data.map((item) => item.embedding);
+      },
+    };
+  }
+
+  return null;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: cors });
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-  const openaiKey = Deno.env.get("OPENAI_API_KEY")!;
-  if (!openaiKey) return json({ error: "OPENAI_API_KEY required" }, 500);
+  const openaiKey = Deno.env.get("OPENAI_API_KEY") || null;
+  const geminiKey = Deno.env.get("GOOGLE_API_KEY") || Deno.env.get("GEMINI_API_KEY") || null;
+  const embeddingProvider = createEmbeddingProvider(openaiKey, geminiKey);
+  if (!embeddingProvider) return json({ error: "OPENAI_API_KEY or GOOGLE_API_KEY/GEMINI_API_KEY required" }, 500);
 
   const supabase = createClient(supabaseUrl, supabaseKey, {
     db: { schema: STAR_VAULT_SCHEMA },
-  });
-  const openai = new OpenAI({
-    apiKey: openaiKey,
-    maxRetries: 5,
-    timeout: 60_000,
   });
 
   const { data: runRow, error: runErr } = await supabase
@@ -84,22 +145,18 @@ Deno.serve(async (req) => {
     let batches = 0;
     for (let i = 0; i < work.length; i += EMBEDDING_BATCH_SIZE) {
       const batch = work.slice(i, i + EMBEDDING_BATCH_SIZE);
-      const response = await openai.embeddings.create({
-        model: EMBEDDING_MODEL,
-        input: batch.map((w) => w.input),
-        encoding_format: "float",
-      });
+      const embeddings = await embeddingProvider.embed(batch.map((w) => w.input));
       batches++;
 
-      if (response.data.length !== batch.length) {
+      if (embeddings.length !== batch.length) {
         throw new Error(
-          `Embedding API returned ${response.data.length} vectors for ${batch.length} inputs`,
+          `Embedding provider returned ${embeddings.length} vectors for ${batch.length} inputs`,
         );
       }
 
       await Promise.all(
         batch.map(async (w, idx) => {
-          const embedding = response.data[idx].embedding;
+          const embedding = embeddings[idx];
           if (embedding.length !== EMBEDDING_DIMENSIONS) {
             throw new Error(`Unexpected embedding dim ${embedding.length}`);
           }
@@ -108,7 +165,7 @@ Deno.serve(async (req) => {
             .update({
               embedding,
               embedding_input_hash: w.hash,
-              embedding_model: EMBEDDING_MODEL,
+              embedding_model: embeddingProvider.model,
               embedding_dim: EMBEDDING_DIMENSIONS,
             })
             .eq("github_id", w.githubId);
@@ -124,7 +181,7 @@ Deno.serve(async (req) => {
         status: "completed",
         embeddings_generated: generated,
         completed_at: new Date().toISOString(),
-        metadata: { batches, skipped_unchanged: skippedUnchanged },
+        metadata: { batches, skipped_unchanged: skippedUnchanged, embedding_provider: embeddingProvider.name },
       })
       .eq("id", runId);
 
@@ -134,6 +191,7 @@ Deno.serve(async (req) => {
       skipped_unchanged: skippedUnchanged,
       embeddings_generated: generated,
       batches,
+      embedding_provider: embeddingProvider.name,
     });
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);

@@ -5,6 +5,7 @@
 
 export const STAR_VAULT_SCHEMA = "star_vault";
 export const EMBEDDING_MODEL = "text-embedding-3-small";
+export const GEMINI_EMBEDDING_MODEL = "gemini-embedding-001";
 export const EMBEDDING_DIMENSIONS = 1536;
 
 export const REPOS_TABLE = "repos";

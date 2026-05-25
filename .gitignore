@@ -30,3 +30,6 @@ bun.lockb
 
 # MCP
 .mcp.json
+
+# Local Claude Code working state
+.claude/
