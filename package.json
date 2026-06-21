@@ -20,15 +20,21 @@
     "deploy:util": "supabase functions deploy sync-stars sync-content sync-reconcile"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
-    "@supabase/supabase-js": "^2.49.4",
-    "dotenv": "^17.2.3",
-    "openai": "^4.78.1",
-    "zod": "^3.24.1"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@supabase/supabase-js": "^2.108.2",
+    "dotenv": "^17.4.2",
+    "openai": "^4.104.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@types/node": "^22.10.2",
-    "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "@types/node": "^22.20.0",
+    "tsx": "^4.22.4",
+    "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "hono": ">=4.12.26",
+    "fast-uri": ">=3.1.2",
+    "ws": ">=8.20.1",
+    "qs": ">=6.15.2"
   }
 }
