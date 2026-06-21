@@ -4,7 +4,11 @@
  * Semantic search over GitHub starred repositories using Supabase.
  */
 
+// override: true ensures project .env wins over stale shell exports
+// (e.g. SUPABASE_SCHEMA=tweet_vault leaking from another project session)
 import "dotenv/config";
+import { config as dotenvConfig } from "dotenv";
+dotenvConfig({ override: true });
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
