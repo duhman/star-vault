@@ -148,6 +148,21 @@ Run standalone:
 bun run mcp
 ```
 
+For Codex, the canonical MCP entry is managed from
+`/Users/workboi/agents/mcp/servers/star-vault/server.yaml` and launches with:
+
+```toml
+[mcp_servers.star-vault]
+command = "bun"
+args = ["run", "--cwd", "/Users/workboi/projects/star-vault", "mcp"]
+env = { "SUPABASE_SCHEMA" = "star_vault" }
+```
+
+The `--cwd` is intentional: it lets the MCP server load this project's `.env`
+without copying secrets into Codex config. During bookmark ingestion, use
+`get_repo_details` for exact GitHub repo URLs and `find_similar` for high-signal
+repos before falling back to live GitHub extraction.
+
 MCP tools:
 
 - `search_repos`
