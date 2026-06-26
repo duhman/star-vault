@@ -23,8 +23,8 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@supabase/supabase-js": "^2.108.2",
     "dotenv": "^17.4.2",
-    "openai": "^4.104.0",
-    "zod": "^3.25.76"
+    "openai": "6.45.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.20.0",

@@ -4,9 +4,11 @@
 // handlers. Drift risk is flagged via shared types below + a typecheck in CI.
 
 export const STAR_VAULT_SCHEMA = "star_vault";
+export const DEFAULT_EMBEDDING_PROVIDER = "openai";
 export const EMBEDDING_MODEL = "text-embedding-3-small";
 export const GEMINI_EMBEDDING_MODEL = "gemini-embedding-001";
 export const EMBEDDING_DIMENSIONS = 1536;
+export const CONTENT_STALE_DAYS = 30;
 
 export const REPOS_TABLE = "repos";
 export const SYNC_RUNS_TABLE = "sync_runs";

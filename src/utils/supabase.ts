@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { createClient } from "@supabase/supabase-js";
 import {
+  CONTENT_STALE_DAYS,
   STAR_VAULT_SCHEMA,
   STAR_VAULT_TABLES,
   type ErrorBucket,
@@ -9,6 +10,7 @@ import { fetchRepoContent } from "../github/content.js";
 import { fetchAllStarredRepos } from "../github/starred.js";
 import { runWithConcurrency } from "./async.js";
 import { classifyError } from "./retry.js";
+import { getConfiguredEmbeddingProviderName } from "../sync/embeddingProvider.js";
 
 export interface Repo {
   id?: number;
@@ -30,7 +32,16 @@ export interface Repo {
   raw_data?: Record<string, unknown>;
   fetched_at?: string;
   content_fetched_at?: string;
+  content_checked_at?: string;
+  content_changed_at?: string;
+  source_changed_at?: string;
   embedding?: number[];
+  embedding_input_hash?: string | null;
+  embedding_provider?: string | null;
+  embedding_model?: string | null;
+  embedding_dim?: number | null;
+  embedding_generated_at?: string | null;
+  needs_embedding?: boolean | null;
 }
 
 export interface SyncStateInput {
@@ -78,6 +89,8 @@ export interface SyncOptions {
   maxPages?: number;
   contentConcurrency?: number;
   embeddingConcurrency?: number;
+  embeddingProvider?: string;
+  contentStaleDays?: number;
   /** Use ETag-cached requests to /user/starred. Default true. Disable for reconcile. */
   useEtags?: boolean;
 }
@@ -108,6 +121,44 @@ function chunkArray<T>(items: T[], size: number): T[][] {
     chunks.push(items.slice(i, i + size));
   }
   return chunks;
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+    .join(",")}}`;
+}
+
+export function isContentStale(
+  repo: Pick<Repo, "content_fetched_at" | "content_checked_at">,
+  staleDays = CONTENT_STALE_DAYS,
+  now = new Date(),
+): boolean {
+  if (!repo.content_fetched_at || !repo.content_checked_at) return true;
+  const checkedAt = new Date(repo.content_checked_at).getTime();
+  if (!Number.isFinite(checkedAt)) return true;
+  const staleMs = staleDays * 24 * 60 * 60 * 1000;
+  return now.getTime() - checkedAt >= staleMs;
+}
+
+export function didContentMateriallyChange(
+  current: Pick<Repo, "readme_content" | "package_json">,
+  next: { readme_content?: string; package_json?: Record<string, unknown> },
+): boolean {
+  if (
+    next.readme_content !== undefined &&
+    next.readme_content !== (current.readme_content ?? undefined)
+  ) {
+    return true;
+  }
+  if (next.package_json !== undefined) {
+    return stableJson(next.package_json) !== stableJson(current.package_json);
+  }
+  return false;
 }
 
 export function getSupabaseClient(): any {
@@ -241,17 +292,34 @@ export async function getStats(): Promise<VaultStats> {
   };
 }
 
-export async function getReposWithoutContent(limit: number): Promise<Repo[]> {
+export async function getReposNeedingContent(
+  limit: number,
+  staleDays = CONTENT_STALE_DAYS,
+): Promise<Repo[]> {
   const supabase = getSupabaseClient();
+  const staleBefore = new Date(
+    Date.now() - staleDays * 24 * 60 * 60 * 1000,
+  ).toISOString();
   const { data, error } = await supabase
     .from(STAR_VAULT_TABLES.repos)
     .select("*")
-    .is("content_fetched_at", null)
+    .or(
+      [
+        "content_fetched_at.is.null",
+        "content_checked_at.is.null",
+        `content_checked_at.lt.${staleBefore}`,
+      ].join(","),
+    )
+    .order("content_checked_at", { ascending: true, nullsFirst: true })
     .order("starred_at", { ascending: false })
     .limit(limit);
 
   if (error) throw error;
   return (data ?? []) as Repo[];
+}
+
+export async function getReposWithoutContent(limit: number): Promise<Repo[]> {
+  return getReposNeedingContent(limit);
 }
 
 export async function getReposWithoutEmbeddings(
@@ -273,17 +341,38 @@ export async function getReposWithoutEmbeddings(
 export async function updateRepoContent(
   githubId: number,
   content: { readme_content?: string; package_json?: Record<string, unknown> },
-): Promise<void> {
+): Promise<{ changed: boolean }> {
   const supabase = getSupabaseClient();
+  const currentResult = await supabase
+    .from(STAR_VAULT_TABLES.repos)
+    .select("readme_content, package_json")
+    .eq("github_id", githubId)
+    .single();
+
+  if (currentResult.error) throw currentResult.error;
+  const changed = didContentMateriallyChange(
+    (currentResult.data ?? {}) as Pick<Repo, "readme_content" | "package_json">,
+    content,
+  );
+
+  const now = new Date().toISOString();
   const { error } = await supabase
     .from(STAR_VAULT_TABLES.repos)
     .update({
       ...content,
-      content_fetched_at: new Date().toISOString(),
+      content_fetched_at: now,
+      content_checked_at: now,
+      ...(changed
+        ? {
+            content_changed_at: now,
+            needs_embedding: true,
+          }
+        : {}),
     })
     .eq("github_id", githubId);
 
   if (error) throw error;
+  return { changed };
 }
 
 export async function updateRepoEmbedding(
@@ -321,6 +410,12 @@ export async function syncStarVault(args?: SyncOptions): Promise<SyncResult> {
   // parallelize inside a single API call. Kept on the type for CLI compat.
   const contentLimit = args?.contentLimit ?? 0;
   const embeddingLimit = args?.embeddingLimit ?? 0;
+  const embeddingProvider = getConfiguredEmbeddingProviderName({
+    ...process.env,
+    ...(args?.embeddingProvider
+      ? { EMBEDDING_PROVIDER: args.embeddingProvider }
+      : {}),
+  });
 
   const result: SyncResult = {
     repos_fetched: 0,
@@ -392,7 +487,10 @@ export async function syncStarVault(args?: SyncOptions): Promise<SyncResult> {
       console.log(
         `  Fetching content for up to ${contentLimit} repos (concurrency ${contentConcurrency})...`,
       );
-      const reposNeedingContent = await getReposWithoutContent(contentLimit);
+      const reposNeedingContent = await getReposNeedingContent(
+        contentLimit,
+        args?.contentStaleDays ?? CONTENT_STALE_DAYS,
+      );
 
       await runWithConcurrency(
         reposNeedingContent,
@@ -434,17 +532,13 @@ export async function syncStarVault(args?: SyncOptions): Promise<SyncResult> {
   if (embeddingLimit > 0) {
     const embeddingsPhaseStart = Date.now();
     try {
-      if (!process.env.OPENAI_API_KEY) {
-        throw new Error("Missing OPENAI_API_KEY environment variable");
-      }
-
       console.log(
-        `  Generating embeddings for up to ${embeddingLimit} repos (batched)...`,
+        `  Generating ${embeddingProvider} embeddings for up to ${embeddingLimit} repos (batched)...`,
       );
       const { generateEmbeddingsBatch } = await import("../sync/embeddings.js");
       const emb = await generateEmbeddingsBatch({
         limit: embeddingLimit,
-        openaiApiKey: process.env.OPENAI_API_KEY,
+        providerName: embeddingProvider,
       });
       result.embeddings_generated = emb.embeddings_generated;
       console.log(
@@ -471,6 +565,8 @@ export async function syncStarVault(args?: SyncOptions): Promise<SyncResult> {
         errors_count: result.errors.length,
         error_summary: result.error_summary,
         phase_durations_ms: result.phase_durations_ms,
+        embedding_provider: embeddingProvider,
+        content_stale_days: args?.contentStaleDays ?? CONTENT_STALE_DAYS,
       },
     });
   } catch (error) {

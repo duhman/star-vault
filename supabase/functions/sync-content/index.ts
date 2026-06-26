@@ -7,6 +7,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.47.0";
 import {
   CONTENT_BATCH_LIMIT,
+  CONTENT_STALE_DAYS,
   REPOS_TABLE,
   STAR_VAULT_SCHEMA,
   SYNC_RUNS_TABLE,
@@ -43,10 +44,22 @@ Deno.serve(async (req) => {
   const errors: string[] = [];
 
   try {
+    const staleBefore = new Date(
+      Date.now() - CONTENT_STALE_DAYS * 24 * 60 * 60 * 1000,
+    ).toISOString();
     const { data: candidates, error: candErr } = await supabase
       .from(REPOS_TABLE)
-      .select("github_id, owner, name, default_branch")
-      .is("content_fetched_at", null)
+      .select(
+        "github_id, owner, name, default_branch, readme_content, package_json",
+      )
+      .or(
+        [
+          "content_fetched_at.is.null",
+          "content_checked_at.is.null",
+          `content_checked_at.lt.${staleBefore}`,
+        ].join(","),
+      )
+      .order("content_checked_at", { ascending: true, nullsFirst: true })
       .order("starred_at", { ascending: false })
       .limit(CONTENT_BATCH_LIMIT);
     if (candErr) throw candErr;
@@ -57,6 +70,8 @@ Deno.serve(async (req) => {
       owner: string;
       name: string;
       default_branch: string;
+      readme_content: string | null;
+      package_json: Record<string, unknown> | null;
     }[];
 
     // Simple worker-pool for bounded parallelism
@@ -80,9 +95,25 @@ Deno.serve(async (req) => {
 
             const patch: Record<string, unknown> = {
               content_fetched_at: new Date().toISOString(),
+              content_checked_at: new Date().toISOString(),
             };
             if (readme !== null) patch.readme_content = readme;
             if (packageJson !== null) patch.package_json = packageJson;
+            if (
+              didContentChange(
+                {
+                  readme_content: repo.readme_content,
+                  package_json: repo.package_json,
+                },
+                {
+                  readme_content: readme ?? undefined,
+                  package_json: packageJson ?? undefined,
+                },
+              )
+            ) {
+              patch.content_changed_at = new Date().toISOString();
+              patch.needs_embedding = true;
+            }
 
             const { error: updErr } = await supabase
               .from(REPOS_TABLE)
@@ -134,6 +165,35 @@ Deno.serve(async (req) => {
     });
   }
 });
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+    .join(",")}}`;
+}
+
+function didContentChange(
+  current: {
+    readme_content: string | null;
+    package_json: Record<string, unknown> | null;
+  },
+  next: { readme_content?: string; package_json?: Record<string, unknown> },
+): boolean {
+  if (
+    next.readme_content !== undefined &&
+    next.readme_content !== (current.readme_content ?? undefined)
+  ) {
+    return true;
+  }
+  if (next.package_json !== undefined) {
+    return stableJson(next.package_json) !== stableJson(current.package_json);
+  }
+  return false;
+}
 
 // deno-lint-ignore no-explicit-any
 async function fetchReadme(

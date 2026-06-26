@@ -14,6 +14,8 @@
 
 import {
   EMBEDDING_DIMENSIONS,
+  EMBEDDING_MODEL,
+  DEFAULT_EMBEDDING_PROVIDER,
   STAR_VAULT_RPC,
   STAR_VAULT_TABLES,
 } from "../shared/starVault.js";
@@ -107,6 +109,19 @@ export async function runVerify(): Promise<{
     ),
   );
 
+  results.push(
+    await check("provider/freshness columns exist (0024)", async () => {
+      const { error } = await supabase
+        .from(STAR_VAULT_TABLES.repos)
+        .select(
+          "embedding_provider, embedding_generated_at, content_checked_at, content_changed_at, source_changed_at, needs_embedding",
+        )
+        .limit(1);
+      if (error) throw new Error(error.message);
+      return undefined;
+    }),
+  );
+
   // 5. search_repos RPC with the new IP-ops shape (0016)
   results.push(
     await check("search_repos RPC executable (0016)", async () => {
@@ -115,6 +130,9 @@ export async function runVerify(): Promise<{
         query_embedding: JSON.stringify(zero),
         match_threshold: 2, // guarantees 0 results
         match_count: 1,
+        embedding_provider_filter: DEFAULT_EMBEDDING_PROVIDER,
+        embedding_model_filter: EMBEDDING_MODEL,
+        embedding_dim_filter: EMBEDDING_DIMENSIONS,
       });
       if (error) throw new Error(error.message);
       return undefined;

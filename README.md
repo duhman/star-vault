@@ -35,7 +35,8 @@ generates embeddings, and exposes semantic search through CLI and MCP tools.
 
 - Runtime: Bun + TypeScript
 - Database: Supabase Postgres + pgvector
-- Embeddings: OpenAI `text-embedding-3-small` (1536-d)
+- Embeddings: OpenAI `text-embedding-3-small` (1536-d) by default; Gemini
+  `gemini-embedding-001` can be enabled explicitly with `EMBEDDING_PROVIDER=gemini`
 - Canonical schema: `star_vault`
 - Canonical tables: `star_vault.repos`, `star_vault.sync_state`
 - Canonical RPC: `star_vault.search_repos`
@@ -58,8 +59,15 @@ Set required variables in `.env`:
 
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
-- `OPENAI_API_KEY`
 - `GITHUB_TOKEN`
+- `OPENAI_API_KEY` when using the default OpenAI provider, or `GEMINI_API_KEY`
+  / `GOOGLE_API_KEY` when `EMBEDDING_PROVIDER=gemini`
+
+Optional:
+
+- `EMBEDDING_PROVIDER=openai|gemini` (defaults to `openai`)
+- `GEMINI_API_KEY` or `GOOGLE_API_KEY` when `EMBEDDING_PROVIDER=gemini`
+- `CONTENT_STALE_DAYS` (defaults to 30)
 
 ## Database Migrations
 
@@ -78,6 +86,7 @@ Apply migrations in order:
 11. `0021_delete_unseen_repos_rpc.sql` — NULL-safe delete via `IS DISTINCT FROM`
 12. `0022_remove_orphan_daily_cron.sql` — clean up legacy daily cron job
 13. `0023_invoke_edge_function_via_vault.sql` — read the service-role JWT from Supabase Vault (newer Supabase Cloud projects no longer allow `ALTER DATABASE ... SET` for `app.settings.*`)
+14. `0024_embedding_provider_and_freshness.sql` — explicit embedding provider metadata, stale content checks, and provider-filtered semantic search
 
 After migrations, store the service-role JWT in Vault (once, via `supabase db query` or the dashboard SQL editor):
 
@@ -121,8 +130,13 @@ bun run stats
   near-zero of the budget when nothing changed.
 - README fetch uses `GET /repos/{owner}/{repo}/readme` (ETag-cached), not
   filename-guessing on `raw.githubusercontent.com`.
-- Embeddings batch up to ~96 inputs per OpenAI call. Each row stores a
-  SHA-256 of the exact embedding input; unchanged inputs are skipped.
+- Embeddings batch up to ~96 inputs per provider call. Each row stores a
+  SHA-256 of the exact embedding input plus provider/model/dimension metadata;
+  unchanged inputs are skipped and mixed provider vectors are never searched
+  together.
+- Content fetches revisit rows whose `content_checked_at` is missing or stale
+  (`CONTENT_STALE_DAYS`, default 30). Material README/package changes raise
+  `needs_embedding` for the next embedding batch.
 - Reconcile (hard-delete of unstarred repos) is gated on `isSafeToReconcile`.
 
 ### Optional Flags
@@ -131,7 +145,9 @@ bun run stats
 - `--content-limit <n>` override content batch size
 - `--embedding-limit <n>` override embedding batch size
 - `--concurrency-content <n>` content worker concurrency
-- `--concurrency-embeddings <n>` embedding worker concurrency
+- `--concurrency-embeddings <n>` deprecated compatibility no-op; embeddings are batched
+- `--embedding-provider <openai|gemini>` override `EMBEDDING_PROVIDER`
+- `--content-stale-days <n>` override stale content window
 
 Examples:
 
@@ -170,6 +186,11 @@ MCP tools:
 - `list_by_language`
 - `find_similar`
 - `get_stats`
+
+`search_repos` accepts an optional `dependency` argument. When present, exact
+package.json dependency matches are prioritized ahead of semantic-only matches.
+Search and `find_similar` use the active embedding provider/model/dimension
+filter so OpenAI and Gemini vectors are not mixed.
 
 The server performs startup checks for canonical table and RPC availability and
 fails fast with actionable errors if schema drift is detected.

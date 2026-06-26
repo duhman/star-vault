@@ -11,17 +11,17 @@ import { config as dotenvConfig } from "dotenv";
 dotenvConfig({ override: true });
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
+import { z } from "zod/v4";
 import { createClient } from "@supabase/supabase-js";
-import OpenAI from "openai";
 import {
+  CONTENT_STALE_DAYS,
   EMBEDDING_DIMENSIONS,
-  EMBEDDING_MODEL,
   STAR_VAULT_RPC,
   STAR_VAULT_SCHEMA,
   STAR_VAULT_TABLES,
   type SearchRepoRow,
 } from "../src/shared/starVault.js";
+import { createEmbeddingProvider } from "../src/sync/embeddingProvider.js";
 
 interface RepoDetails {
   id: number;
@@ -34,8 +34,42 @@ interface RepoDetails {
   license?: string | null;
   html_url: string;
   starred_at?: string | null;
+  content_fetched_at?: string | null;
+  content_checked_at?: string | null;
+  content_changed_at?: string | null;
+  source_changed_at?: string | null;
+  embedding_provider?: string | null;
+  embedding_model?: string | null;
+  embedding_dim?: number | null;
+  embedding_generated_at?: string | null;
   readme_content?: string | null;
   package_json?: Record<string, unknown> | null;
+}
+
+interface RepoDependencyCandidate extends SearchRepoRow {
+  package_json?: Record<string, unknown> | null;
+}
+
+interface SearchReposArgs {
+  query: string;
+  limit?: number;
+  language?: string;
+  min_stars?: number;
+  dependency?: string;
+}
+
+interface RepoNameArgs {
+  full_name: string;
+}
+
+interface ListByLanguageArgs {
+  language: string;
+  limit?: number;
+  sort_by?: "stars" | "forks" | "starred_at";
+}
+
+interface FindSimilarArgs extends RepoNameArgs {
+  limit?: number;
 }
 
 function requireEnv(name: string): string {
@@ -50,16 +84,11 @@ function requireEnv(name: string): string {
 
 const supabaseUrl = requireEnv("SUPABASE_URL");
 const supabaseKey = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
-const openaiKey = requireEnv("OPENAI_API_KEY");
 
 const supabase = createClient(supabaseUrl, supabaseKey, {
   db: { schema: STAR_VAULT_SCHEMA },
 });
-const openai = new OpenAI({
-  apiKey: openaiKey,
-  maxRetries: 2,
-  timeout: 20_000,
-});
+const embeddingProvider = createEmbeddingProvider();
 
 async function verifyBackendReadiness(): Promise<void> {
   const { error: tableError } = await supabase
@@ -79,6 +108,9 @@ async function verifyBackendReadiness(): Promise<void> {
     query_embedding: JSON.stringify(zeroVector),
     match_threshold: 2,
     match_count: 1,
+    embedding_provider_filter: embeddingProvider.name,
+    embedding_model_filter: embeddingProvider.model,
+    embedding_dim_filter: embeddingProvider.dimensions,
   });
 
   if (rpcError) {
@@ -90,11 +122,8 @@ async function verifyBackendReadiness(): Promise<void> {
 }
 
 async function getEmbedding(text: string): Promise<number[]> {
-  const response = await openai.embeddings.create({
-    model: EMBEDDING_MODEL,
-    input: text,
-  });
-  return response.data[0].embedding;
+  const [embedding] = await embeddingProvider.embed([text]);
+  return embedding;
 }
 
 async function resolveCanonicalLanguage(input: string): Promise<string | null> {
@@ -121,18 +150,132 @@ async function resolveCanonicalLanguage(input: string): Promise<string | null> {
 function formatRepoLine(repo: SearchRepoRow, index: number): string {
   const similarity = ((repo.similarity ?? 0) * 100).toFixed(1);
   const metrics: string[] = [];
-  if (repo.stargazers_count != null) metrics.push(`⭐ ${repo.stargazers_count}`);
-  if (repo.forks_count != null) metrics.push(`🍴 ${repo.forks_count}`);
+  if (repo.stargazers_count != null) metrics.push(`Stars ${repo.stargazers_count}`);
+  if (repo.forks_count != null) metrics.push(`Forks ${repo.forks_count}`);
   metrics.push(repo.language || "Unknown");
   if (repo.starred_at) {
     metrics.push(`Starred ${new Date(repo.starred_at).toLocaleDateString()}`);
   }
+  if (repo.dependency_match) metrics.push("dependency match");
 
   return `${index + 1}. **${repo.full_name}** (${similarity}% match)
    ${metrics.join(" | ")}
    ${repo.description || "No description"}
    Topics: ${repo.topics?.join(", ") || "none"}
+   ${formatFreshness(repo)}
    URL: ${repo.html_url}`;
+}
+
+function ageInDays(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return null;
+  return Math.max(0, Math.floor((Date.now() - timestamp) / 86_400_000));
+}
+
+function formatAge(value: string | null | undefined): string {
+  const days = ageInDays(value);
+  if (days === null) return "unknown";
+  if (days === 0) return "today";
+  if (days === 1) return "1 day ago";
+  return `${days} days ago`;
+}
+
+function formatFreshness(repo: SearchRepoRow): string {
+  const contentAge = ageInDays(repo.content_checked_at);
+  const contentState =
+    contentAge === null
+      ? "content not checked"
+      : contentAge > CONTENT_STALE_DAYS
+        ? `content stale (${contentAge} days)`
+        : `content checked ${formatAge(repo.content_checked_at)}`;
+  const embeddingState = repo.embedding_generated_at
+    ? `embedding ${repo.embedding_provider ?? "unknown"}/${repo.embedding_model ?? "unknown"} generated ${formatAge(repo.embedding_generated_at)}`
+    : "embedding age unknown";
+  return `Freshness: ${contentState}; ${embeddingState}`;
+}
+
+function dependencyNames(
+  packageJson: Record<string, unknown> | null | undefined,
+): string[] {
+  if (!packageJson) return [];
+  const names: string[] = [];
+  for (const key of [
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies",
+  ]) {
+    const deps = packageJson[key];
+    if (deps && typeof deps === "object" && !Array.isArray(deps)) {
+      names.push(...Object.keys(deps as Record<string, unknown>));
+    }
+  }
+  return [...new Set(names)];
+}
+
+function inferDependencyQuery(query: string): string | null {
+  const match = query.match(
+    /\b(?:using|uses|use|depends on|dependency|package|library)\s+(@?[\w./-]+)/i,
+  );
+  return match?.[1] ?? null;
+}
+
+async function findDependencyMatches(options: {
+  dependency: string;
+  limit: number;
+  language?: string;
+  minStars?: number;
+}): Promise<SearchRepoRow[]> {
+  const needle = options.dependency.toLowerCase();
+  const { data, error } = await supabase
+    .from(STAR_VAULT_TABLES.repos)
+    .select(
+      "id, full_name, description, topics, language, html_url, stargazers_count, forks_count, starred_at, content_fetched_at, content_checked_at, content_changed_at, source_changed_at, embedding_provider, embedding_model, embedding_dim, embedding_generated_at, package_json",
+    )
+    .not("package_json", "is", null)
+    .limit(2000);
+
+  if (error) throw error;
+
+  return ((data ?? []) as RepoDependencyCandidate[])
+    .filter((repo) =>
+      dependencyNames(repo.package_json).some(
+        (name) => name.toLowerCase() === needle,
+      ),
+    )
+    .filter((repo) => !options.language || repo.language === options.language)
+    .filter((repo) => (repo.stargazers_count ?? 0) >= (options.minStars ?? 0))
+    .sort((a, b) => (b.stargazers_count ?? 0) - (a.stargazers_count ?? 0))
+    .slice(0, options.limit)
+    .map((repo) => ({
+      ...repo,
+      dependency_match: true,
+      similarity: 1,
+    }));
+}
+
+function mergeResults(
+  semanticResults: SearchRepoRow[],
+  dependencyResults: SearchRepoRow[],
+): SearchRepoRow[] {
+  const byName = new Map<string, SearchRepoRow>();
+  for (const repo of dependencyResults) {
+    byName.set(repo.full_name, repo);
+  }
+  for (const repo of semanticResults) {
+    const existing = byName.get(repo.full_name);
+    byName.set(repo.full_name, {
+      ...repo,
+      dependency_match: existing?.dependency_match ?? repo.dependency_match,
+    });
+  }
+  return [...byName.values()].sort((a, b) => {
+    if (a.dependency_match !== b.dependency_match) {
+      return a.dependency_match ? -1 : 1;
+    }
+    return (b.similarity ?? 0) - (a.similarity ?? 0);
+  });
 }
 
 const server = new McpServer({
@@ -140,45 +283,81 @@ const server = new McpServer({
   version: "2.1.0",
 });
 
-server.tool(
+server.registerTool(
   "search_repos",
-  "Search starred GitHub repositories using semantic search. Returns repos matching the query based on their description, README, and topics.",
   {
-    query: z.string().describe("Natural language search query"),
-    limit: z
-      .number()
-      .min(1)
-      .max(50)
-      .default(10)
-      .describe("Maximum number of results"),
-    language: z.string().optional().describe("Filter by programming language"),
-    min_stars: z.number().optional().describe("Minimum star count"),
+    title: "Search Repositories",
+    description:
+      "Search starred GitHub repositories using semantic search, with optional dependency matching.",
+    inputSchema: z.object({
+      query: z.string().describe("Natural language search query"),
+      limit: z
+        .number()
+        .min(1)
+        .max(50)
+        .default(10)
+        .describe("Maximum number of results"),
+      language: z.string().optional().describe("Filter by programming language"),
+      min_stars: z.number().optional().describe("Minimum star count"),
+      dependency: z
+        .string()
+        .optional()
+        .describe("Exact package/dependency name to prioritize"),
+    }) as any,
   },
-  async ({ query, limit = 10, language, min_stars }) => {
+  async (args: unknown) => {
+    const {
+      query,
+      limit = 10,
+      language,
+      min_stars,
+      dependency,
+    } = args as SearchReposArgs;
     try {
+      const dependencyQuery = dependency ?? inferDependencyQuery(query);
       const embedding = await getEmbedding(query);
       const { data, error } = await supabase.rpc(STAR_VAULT_RPC.searchRepos, {
         query_embedding: JSON.stringify(embedding),
         match_threshold: 0.5,
         match_count: limit * 3,
+        embedding_provider_filter: embeddingProvider.name,
+        embedding_model_filter: embeddingProvider.model,
+        embedding_dim_filter: embeddingProvider.dimensions,
       });
 
       if (error) throw error;
 
-      let results = ((data ?? []) as SearchRepoRow[]).slice();
+      let canonicalLanguage: string | null | undefined;
 
       if (language) {
-        const canonicalLanguage = await resolveCanonicalLanguage(language);
+        canonicalLanguage = await resolveCanonicalLanguage(language);
         if (!canonicalLanguage) {
           return {
             content: [
               {
-                type: "text",
+                type: "text" as const,
                 text: `No repositories found for language "${language}".`,
               },
             ],
           };
         }
+      }
+
+      const dependencyResults = dependencyQuery
+        ? await findDependencyMatches({
+            dependency: dependencyQuery,
+            limit,
+            language: canonicalLanguage ?? undefined,
+            minStars: min_stars,
+          })
+        : [];
+
+      let results = mergeResults(
+        ((data ?? []) as SearchRepoRow[]).slice(),
+        dependencyResults,
+      );
+
+      if (canonicalLanguage) {
         results = results.filter((repo) => repo.language === canonicalLanguage);
       }
 
@@ -190,15 +369,15 @@ server.tool(
 
       if (results.length === 0) {
         return {
-          content: [{ type: "text", text: "No matching repositories found." }],
+          content: [{ type: "text" as const, text: "No matching repositories found." }],
         };
       }
 
       return {
         content: [
           {
-            type: "text",
-            text: `Found ${results.length} matching repositories:\n\n${results
+            type: "text" as const,
+            text: `Found ${results.length} matching repositories using ${embeddingProvider.name}/${embeddingProvider.model}${dependencyQuery ? ` with dependency lens "${dependencyQuery}"` : ""}:\n\n${results
               .map((repo, index) => formatRepoLine(repo, index))
               .join("\n\n")}`,
           },
@@ -208,7 +387,7 @@ server.tool(
       return {
         content: [
           {
-            type: "text",
+            type: "text" as const,
             text: `Error: ${error instanceof Error ? error.message : String(error)}`,
           },
         ],
@@ -217,13 +396,20 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "get_repo_details",
-  "Get detailed information about a specific starred repository, including its README content.",
   {
-    full_name: z.string().describe("Repository full name (e.g., 'owner/repo')"),
+    title: "Get Repository Details",
+    description:
+      "Get detailed information about a specific starred repository, including README content.",
+    inputSchema: z.object({
+      full_name: z
+        .string()
+        .describe("Repository full name (e.g., 'owner/repo')"),
+    }) as any,
   },
-  async ({ full_name }) => {
+  async (args: unknown) => {
+    const { full_name } = args as RepoNameArgs;
     try {
       const { data: repo, error } = await supabase
         .from(STAR_VAULT_TABLES.repos)
@@ -235,7 +421,7 @@ server.tool(
         return {
           content: [
             {
-              type: "text",
+              type: "text" as const,
               text: `Repository "${full_name}" not found in starred repos.`,
             },
           ],
@@ -265,7 +451,7 @@ server.tool(
       return {
         content: [
           {
-            type: "text",
+            type: "text" as const,
             text: `# ${typedRepo.full_name}
 
 ${typedRepo.description || "No description"}
@@ -276,7 +462,27 @@ ${typedRepo.description || "No description"}
 **Topics:** ${typedRepo.topics?.join(", ") || "none"}
 
 **URL:** ${typedRepo.html_url}
-**Starred:** ${typedRepo.starred_at ? new Date(typedRepo.starred_at).toLocaleDateString() : "Unknown"}${readme}${deps}`,
+**Starred:** ${typedRepo.starred_at ? new Date(typedRepo.starred_at).toLocaleDateString() : "Unknown"}
+**Freshness:** ${formatFreshness({
+              id: typedRepo.id,
+              full_name: typedRepo.full_name,
+              description: typedRepo.description ?? null,
+              topics: typedRepo.topics ?? null,
+              language: typedRepo.language ?? null,
+              html_url: typedRepo.html_url,
+              stargazers_count: typedRepo.stargazers_count,
+              forks_count: typedRepo.forks_count,
+              starred_at: typedRepo.starred_at,
+              content_fetched_at: typedRepo.content_fetched_at,
+              content_checked_at: typedRepo.content_checked_at,
+              content_changed_at: typedRepo.content_changed_at,
+              source_changed_at: typedRepo.source_changed_at,
+              embedding_provider: typedRepo.embedding_provider,
+              embedding_model: typedRepo.embedding_model,
+              embedding_dim: typedRepo.embedding_dim,
+              embedding_generated_at: typedRepo.embedding_generated_at,
+              similarity: 1,
+            })}${readme}${deps}`,
           },
         ],
       };
@@ -284,7 +490,7 @@ ${typedRepo.description || "No description"}
       return {
         content: [
           {
-            type: "text",
+            type: "text" as const,
             text: `Error: ${error instanceof Error ? error.message : String(error)}`,
           },
         ],
@@ -293,7 +499,10 @@ ${typedRepo.description || "No description"}
   },
 );
 
-server.tool("get_stats", "Get statistics about the starred repositories collection.", {}, async () => {
+server.registerTool("get_stats", {
+  title: "Get Statistics",
+  description: "Get statistics about the starred repositories collection.",
+}, async () => {
   try {
     const { count: totalRepos } = await supabase
       .from(STAR_VAULT_TABLES.repos)
@@ -302,6 +511,14 @@ server.tool("get_stats", "Get statistics about the starred repositories collecti
     const { count: withEmbeddings } = await supabase
       .from(STAR_VAULT_TABLES.repos)
       .select("*", { count: "exact", head: true })
+      .not("embedding", "is", null);
+
+    const { count: withActiveProviderEmbeddings } = await supabase
+      .from(STAR_VAULT_TABLES.repos)
+      .select("*", { count: "exact", head: true })
+      .eq("embedding_provider", embeddingProvider.name)
+      .eq("embedding_model", embeddingProvider.model)
+      .eq("embedding_dim", embeddingProvider.dimensions)
       .not("embedding", "is", null);
 
     const { count: withReadme } = await supabase
@@ -337,11 +554,12 @@ server.tool("get_stats", "Get statistics about the starred repositories collecti
     return {
       content: [
         {
-          type: "text",
+          type: "text" as const,
           text: `# Star Vault Statistics
 
 **Total Repositories:** ${totalRepos ?? 0}
 **With Embeddings:** ${withEmbeddings ?? 0}
+**With Active Provider Embeddings:** ${withActiveProviderEmbeddings ?? 0} (${embeddingProvider.name}/${embeddingProvider.model})
 **With README:** ${withReadme ?? 0}
 **Top Languages:** ${topLangs || "N/A"}
 **Last Synced:** ${lastSync ? new Date(lastSync).toLocaleString() : "Never"}`,
@@ -352,7 +570,7 @@ server.tool("get_stats", "Get statistics about the starred repositories collecti
     return {
       content: [
         {
-          type: "text",
+          type: "text" as const,
           text: `Error: ${error instanceof Error ? error.message : String(error)}`,
         },
       ],
@@ -360,29 +578,37 @@ server.tool("get_stats", "Get statistics about the starred repositories collecti
   }
 });
 
-server.tool(
+server.registerTool(
   "list_by_language",
-  "List starred repositories filtered by programming language.",
   {
-    language: z.string().describe("Programming language to filter by"),
-    limit: z
-      .number()
-      .min(1)
-      .max(100)
-      .default(20)
-      .describe("Maximum number of results"),
-    sort_by: z
-      .enum(["stars", "forks", "starred_at"])
-      .default("stars")
-      .describe("Sort order"),
+    title: "List By Language",
+    description: "List starred repositories filtered by programming language.",
+    inputSchema: z.object({
+      language: z.string().describe("Programming language to filter by"),
+      limit: z
+        .number()
+        .min(1)
+        .max(100)
+        .default(20)
+        .describe("Maximum number of results"),
+      sort_by: z
+        .enum(["stars", "forks", "starred_at"])
+        .default("stars")
+        .describe("Sort order"),
+    }) as any,
   },
-  async ({ language, limit = 20, sort_by = "stars" }) => {
+  async (args: unknown) => {
+    const {
+      language,
+      limit = 20,
+      sort_by = "stars",
+    } = args as ListByLanguageArgs;
     try {
       const canonicalLanguage = await resolveCanonicalLanguage(language);
       if (!canonicalLanguage) {
         return {
           content: [
-            { type: "text", text: `No ${language} repositories found.` },
+            { type: "text" as const, text: `No ${language} repositories found.` },
           ],
         };
       }
@@ -407,7 +633,7 @@ server.tool(
       if (!data || data.length === 0) {
         return {
           content: [
-            { type: "text", text: `No ${language} repositories found.` },
+            { type: "text" as const, text: `No ${language} repositories found.` },
           ],
         };
       }
@@ -429,7 +655,7 @@ server.tool(
       return {
         content: [
           {
-            type: "text",
+            type: "text" as const,
             text: `Found ${data.length} ${canonicalLanguage} repositories:\n\n${lines.join("\n\n")}`,
           },
         ],
@@ -438,7 +664,7 @@ server.tool(
       return {
         content: [
           {
-            type: "text",
+            type: "text" as const,
             text: `Error: ${error instanceof Error ? error.message : String(error)}`,
           },
         ],
@@ -447,43 +673,75 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   "find_similar",
-  "Find repositories similar to a given one based on semantic similarity.",
   {
-    full_name: z
-      .string()
-      .describe("Repository full name to find similar repos for"),
-    limit: z
-      .number()
-      .min(1)
-      .max(20)
-      .default(5)
-      .describe("Maximum number of results"),
+    title: "Find Similar Repositories",
+    description:
+      "Find repositories similar to a given one using the active embedding provider.",
+    inputSchema: z.object({
+      full_name: z
+        .string()
+        .describe("Repository full name to find similar repos for"),
+      limit: z
+        .number()
+        .min(1)
+        .max(20)
+        .default(5)
+        .describe("Maximum number of results"),
+    }) as any,
   },
-  async ({ full_name, limit = 5 }) => {
+  async (args: unknown) => {
+    const { full_name, limit = 5 } = args as FindSimilarArgs;
     try {
       const { data: sourceRepo, error: sourceError } = await supabase
         .from(STAR_VAULT_TABLES.repos)
-        .select("embedding")
+        .select("embedding, embedding_provider, embedding_model, embedding_dim")
         .eq("full_name", full_name)
         .single();
 
-      if (sourceError || !sourceRepo?.embedding) {
+      const typedSource = sourceRepo as
+        | {
+            embedding?: number[] | null;
+            embedding_provider?: string | null;
+            embedding_model?: string | null;
+            embedding_dim?: number | null;
+          }
+        | null;
+
+      if (sourceError || !typedSource?.embedding) {
         return {
           content: [
             {
-              type: "text",
+              type: "text" as const,
               text: `Repository "${full_name}" not found or has no embedding.`,
             },
           ],
         };
       }
 
+      if (
+        typedSource.embedding_provider !== embeddingProvider.name ||
+        typedSource.embedding_model !== embeddingProvider.model ||
+        typedSource.embedding_dim !== embeddingProvider.dimensions
+      ) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Repository "${full_name}" does not have an active ${embeddingProvider.name}/${embeddingProvider.model} embedding yet.`,
+            },
+          ],
+        };
+      }
+
       const { data, error } = await supabase.rpc(STAR_VAULT_RPC.searchRepos, {
-        query_embedding: JSON.stringify(sourceRepo.embedding),
+        query_embedding: JSON.stringify(typedSource.embedding),
         match_threshold: 0.5,
         match_count: limit + 1,
+        embedding_provider_filter: embeddingProvider.name,
+        embedding_model_filter: embeddingProvider.model,
+        embedding_dim_filter: embeddingProvider.dimensions,
       });
 
       if (error) throw error;
@@ -494,7 +752,7 @@ server.tool(
 
       if (similar.length === 0) {
         return {
-          content: [{ type: "text", text: "No similar repositories found." }],
+          content: [{ type: "text" as const, text: "No similar repositories found." }],
         };
       }
 
@@ -502,13 +760,14 @@ server.tool(
         const similarity = ((repo.similarity ?? 0) * 100).toFixed(1);
         return `${index + 1}. **${repo.full_name}** (${similarity}% similar)
    ${repo.language || "Unknown"}
-   ${repo.description || "No description"}`;
+   ${repo.description || "No description"}
+   ${formatFreshness(repo)}`;
       });
 
       return {
         content: [
           {
-            type: "text",
+            type: "text" as const,
             text: `Repositories similar to ${full_name}:\n\n${lines.join("\n\n")}`,
           },
         ],
@@ -517,7 +776,7 @@ server.tool(
       return {
         content: [
           {
-            type: "text",
+            type: "text" as const,
             text: `Error: ${error instanceof Error ? error.message : String(error)}`,
           },
         ],

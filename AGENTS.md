@@ -15,7 +15,8 @@ server.
 - Schema: `star_vault`
 - Tables: `repos`, `sync_state`
 - Search RPC: `search_repos`
-- Embedding model: `text-embedding-3-small` (1536 dimensions)
+- Default embedding provider/model: OpenAI `text-embedding-3-small` (1536 dimensions)
+- Optional embedding provider: Gemini `gemini-embedding-001` with 1536 output dimensions
 
 Legacy Convex artifacts have been removed and are no longer part of this
 repository.
@@ -46,7 +47,9 @@ Supported on sync-style commands:
 - `--content-limit <n>`
 - `--embedding-limit <n>`
 - `--concurrency-content <n>`
-- `--concurrency-embeddings <n>`
+- `--concurrency-embeddings <n>` (deprecated no-op; embeddings are batched)
+- `--embedding-provider <openai|gemini>`
+- `--content-stale-days <n>`
 
 ## Database Migrations
 
@@ -56,8 +59,10 @@ Apply in order:
 2. `supabase/migrations/0002_move_to_public_schema.sql` (obsolete no-op)
 3. `supabase/migrations/0003..0013_legacy_remote_placeholder.sql`
 4. `supabase/migrations/0014_reconcile_star_vault_canonical.sql`
+5. `supabase/migrations/0015..0024_*.sql`
 
-The canonical reconciliation is in `0014`.
+The canonical reconciliation starts in `0014`; provider/freshness search
+behavior is owned by `0024`.
 
 ## Operational Runbook
 
@@ -94,7 +99,9 @@ If MCP startup fails schema checks, re-apply `0014_reconcile_star_vault_canonica
 ## Troubleshooting
 
 - Missing env vars: ensure `.env` defines `SUPABASE_URL`,
-  `SUPABASE_SERVICE_ROLE_KEY`, `GITHUB_TOKEN`, `OPENAI_API_KEY`.
-- Repeated content fetches: candidates are now based on
-  `content_fetched_at is null`; check data integrity if behavior regresses.
-- Search field drift: `search_repos` output contract is owned by migration `003`.
+  `SUPABASE_SERVICE_ROLE_KEY`, `GITHUB_TOKEN`, and either `OPENAI_API_KEY`
+  or `GEMINI_API_KEY` / `GOOGLE_API_KEY` when `EMBEDDING_PROVIDER=gemini`.
+- Repeated content fetches: candidates are based on missing or stale
+  `content_checked_at`; default staleness is 30 days.
+- Search field drift: provider-filtered `search_repos` output is owned by
+  migration `0024`.

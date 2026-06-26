@@ -3,8 +3,9 @@
 // embedding_input_hash has drifted. One OpenAI API call per batch (~96 inputs).
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.47.0";
-import OpenAI from "https://esm.sh/openai@4.104.0";
+import OpenAI from "https://esm.sh/openai@6.45.0";
 import {
+  DEFAULT_EMBEDDING_PROVIDER,
   EMBEDDING_BATCH_LIMIT,
   EMBEDDING_BATCH_SIZE,
   EMBEDDING_DIMENSIONS,
@@ -27,13 +28,32 @@ const cors = {
 };
 
 type EmbeddingProvider = {
-  name: string;
+  name: "openai" | "gemini";
   model: string;
   embed(inputs: string[]): Promise<number[][]>;
 };
 
-function createEmbeddingProvider(openaiKey: string | null, geminiKey: string | null): EmbeddingProvider | null {
-  if (geminiKey) {
+function normalizeVector(vector: number[]): number[] {
+  const magnitude = Math.sqrt(
+    vector.reduce((sum, value) => sum + value * value, 0),
+  );
+  if (!Number.isFinite(magnitude) || magnitude === 0) return vector;
+  return vector.map((value) => value / magnitude);
+}
+
+function normalizeEmbeddingProviderName(raw: string | null | undefined): "openai" | "gemini" {
+  const value = (raw ?? DEFAULT_EMBEDDING_PROVIDER).trim().toLowerCase();
+  if (value === "openai" || value === "gemini") return value;
+  throw new Error(`Unsupported EMBEDDING_PROVIDER "${raw}". Use "openai" or "gemini".`);
+}
+
+function createEmbeddingProvider(
+  providerName: "openai" | "gemini",
+  openaiKey: string | null,
+  geminiKey: string | null,
+): EmbeddingProvider | null {
+  if (providerName === "gemini") {
+    if (!geminiKey) return null;
     return {
       name: "gemini",
       model: GEMINI_EMBEDDING_MODEL,
@@ -61,12 +81,13 @@ function createEmbeddingProvider(openaiKey: string | null, geminiKey: string | n
         if (embeddings.length !== inputs.length) {
           throw new Error(`Gemini returned ${embeddings.length} vectors for ${inputs.length} inputs`);
         }
-        return embeddings;
+        return embeddings.map(normalizeVector);
       },
     };
   }
 
-  if (openaiKey) {
+  if (providerName === "openai") {
+    if (!openaiKey) return null;
     const openai = new OpenAI({
       apiKey: openaiKey,
       maxRetries: 5,
@@ -81,7 +102,7 @@ function createEmbeddingProvider(openaiKey: string | null, geminiKey: string | n
           input: inputs,
           encoding_format: "float",
         });
-        return response.data.map((item) => item.embedding);
+        return response.data.map((item) => normalizeVector(item.embedding));
       },
     };
   }
@@ -96,8 +117,9 @@ Deno.serve(async (req) => {
   const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
   const openaiKey = Deno.env.get("OPENAI_API_KEY") || null;
   const geminiKey = Deno.env.get("GOOGLE_API_KEY") || Deno.env.get("GEMINI_API_KEY") || null;
-  const embeddingProvider = createEmbeddingProvider(openaiKey, geminiKey);
-  if (!embeddingProvider) return json({ error: "OPENAI_API_KEY or GOOGLE_API_KEY/GEMINI_API_KEY required" }, 500);
+  const providerName = normalizeEmbeddingProviderName(Deno.env.get("EMBEDDING_PROVIDER"));
+  const embeddingProvider = createEmbeddingProvider(providerName, openaiKey, geminiKey);
+  if (!embeddingProvider) return json({ error: providerName === "openai" ? "OPENAI_API_KEY required" : "GOOGLE_API_KEY or GEMINI_API_KEY required" }, 500);
 
   const supabase = createClient(supabaseUrl, supabaseKey, {
     db: { schema: STAR_VAULT_SCHEMA },
@@ -115,10 +137,20 @@ Deno.serve(async (req) => {
     const { data, error } = await supabase
       .from(REPOS_TABLE)
       .select(
-        "github_id, full_name, description, language, topics, license, stargazers_count, forks_count, readme_content, package_json, embedding, embedding_input_hash",
+        "github_id, full_name, description, language, topics, license, stargazers_count, forks_count, readme_content, package_json, embedding, embedding_input_hash, embedding_provider, embedding_model, embedding_dim, embedding_generated_at, needs_embedding",
       )
       .not("content_fetched_at", "is", null)
-      .or("embedding.is.null,embedding_input_hash.is.null")
+      .or(
+        [
+          "needs_embedding.eq.true",
+          "embedding.is.null",
+          "embedding_input_hash.is.null",
+          `embedding_provider.neq.${embeddingProvider.name}`,
+          `embedding_model.neq.${embeddingProvider.model}`,
+          `embedding_dim.neq.${EMBEDDING_DIMENSIONS}`,
+          "embedding_generated_at.is.null",
+        ].join(","),
+      )
       .order("starred_at", { ascending: false })
       .limit(EMBEDDING_BATCH_LIMIT);
     if (error) throw error;
@@ -127,6 +159,11 @@ Deno.serve(async (req) => {
       github_id: number;
       embedding: number[] | null;
       embedding_input_hash: string | null;
+      embedding_provider: string | null;
+      embedding_model: string | null;
+      embedding_dim: number | null;
+      embedding_generated_at: string | null;
+      needs_embedding: boolean | null;
     })[];
 
     let skippedUnchanged = 0;
@@ -134,7 +171,15 @@ Deno.serve(async (req) => {
     for (const repo of candidates) {
       const input = buildEmbeddingInput(repo);
       const hash = await sha256Hex(input);
-      if (repo.embedding_input_hash === hash && repo.embedding) {
+      if (
+        repo.embedding &&
+        repo.embedding_input_hash === hash &&
+        !repo.needs_embedding &&
+        repo.embedding_provider === embeddingProvider.name &&
+        repo.embedding_model === embeddingProvider.model &&
+        repo.embedding_dim === EMBEDDING_DIMENSIONS &&
+        repo.embedding_generated_at
+      ) {
         skippedUnchanged++;
         continue;
       }
@@ -165,8 +210,11 @@ Deno.serve(async (req) => {
             .update({
               embedding,
               embedding_input_hash: w.hash,
+              embedding_provider: embeddingProvider.name,
               embedding_model: embeddingProvider.model,
               embedding_dim: EMBEDDING_DIMENSIONS,
+              embedding_generated_at: new Date().toISOString(),
+              needs_embedding: false,
             })
             .eq("github_id", w.githubId);
           if (updErr) throw updErr;

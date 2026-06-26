@@ -15,13 +15,15 @@
  */
 
 import { createHash } from "node:crypto";
-import OpenAI from "openai";
 import {
   EMBEDDING_DIMENSIONS,
-  EMBEDDING_MODEL,
   STAR_VAULT_TABLES,
 } from "../shared/starVault.js";
 import { getSupabaseClient, type Repo } from "../utils/supabase.js";
+import {
+  createEmbeddingProvider,
+  type EmbeddingProvider,
+} from "./embeddingProvider.js";
 
 /** Inputs per batch call. Well under the 2048 / 300k-token API ceilings. */
 const EMBEDDING_BATCH_SIZE = 96;
@@ -31,6 +33,17 @@ export interface EmbeddingResult {
   repos_skipped_unchanged: number;
   embeddings_generated: number;
   batches: number;
+  embedding_provider: string;
+  embedding_model: string;
+}
+
+export interface EmbeddableRepo extends Repo {
+  embedding_input_hash?: string | null;
+  embedding_provider?: string | null;
+  embedding_model?: string | null;
+  embedding_dim?: number | null;
+  embedding_generated_at?: string | null;
+  needs_embedding?: boolean | null;
 }
 
 /**
@@ -143,54 +156,75 @@ function chunk<T>(items: T[], size: number): T[][] {
   return out;
 }
 
+export function shouldGenerateEmbedding(
+  repo: EmbeddableRepo,
+  provider: Pick<EmbeddingProvider, "name" | "model" | "dimensions">,
+  inputHash: string,
+): boolean {
+  if (!repo.embedding) return true;
+  if (!repo.embedding_input_hash) return true;
+  if (repo.embedding_input_hash !== inputHash) return true;
+  if (repo.needs_embedding) return true;
+  if (repo.embedding_provider !== provider.name) return true;
+  if (repo.embedding_model !== provider.model) return true;
+  if (repo.embedding_dim !== provider.dimensions) return true;
+  if (!repo.embedding_generated_at) return true;
+  return false;
+}
+
 /**
  * Process up to `limit` repos lacking embeddings (or whose input hash has
  * drifted). Returns counts for reporting.
  */
 export async function generateEmbeddingsBatch(options: {
   limit: number;
-  openaiApiKey: string;
+  providerName?: string;
 }): Promise<EmbeddingResult> {
   const supabase = getSupabaseClient();
-  const openai = new OpenAI({
-    apiKey: options.openaiApiKey,
-    maxRetries: 5, // SDK backs off with jitter + honors Retry-After
-    timeout: 60_000,
+  const provider = createEmbeddingProvider({
+    providerName: options.providerName,
   });
 
   // Candidate set: any repo with content fetched and either
-  //   (a) no embedding at all, OR
-  //   (b) a stored embedding_input_hash that no longer matches buildEmbeddingInput(repo).
-  //
-  // We can't test (b) at the DB level without recomputing the hash, so we
-  // fetch a bit more than `limit` and filter client-side. For the first
-  // pass where most repos lack embeddings entirely, this is a no-op filter.
+  //   (a) needs_embedding was raised by repo/content changes,
+  //   (b) there is no embedding/hash yet, or
+  //   (c) the row belongs to another provider/model/dimension.
   const { data, error } = await supabase
     .from(STAR_VAULT_TABLES.repos)
     .select("*")
     .not("content_fetched_at", "is", null)
-    .or("embedding.is.null,embedding_input_hash.is.null")
+    .or(
+      [
+        "needs_embedding.eq.true",
+        "embedding.is.null",
+        "embedding_input_hash.is.null",
+        `embedding_provider.neq.${provider.name}`,
+        `embedding_model.neq.${provider.model}`,
+        `embedding_dim.neq.${provider.dimensions}`,
+        "embedding_generated_at.is.null",
+      ].join(","),
+    )
     .order("starred_at", { ascending: false })
     .limit(options.limit);
 
   if (error) throw error;
-  const candidates = (data ?? []) as (Repo & {
-    embedding_input_hash?: string | null;
-  })[];
+  const candidates = (data ?? []) as EmbeddableRepo[];
 
   const result: EmbeddingResult = {
     repos_scanned: candidates.length,
     repos_skipped_unchanged: 0,
     embeddings_generated: 0,
     batches: 0,
+    embedding_provider: provider.name,
+    embedding_model: provider.model,
   };
 
   // Compute inputs + hashes up front, drop rows whose hash hasn't changed.
-  const workItems: Array<{ repo: Repo; input: string; hash: string }> = [];
+  const workItems: Array<{ repo: EmbeddableRepo; input: string; hash: string }> = [];
   for (const repo of candidates) {
     const input = buildEmbeddingInput(repo);
     const hash = sha256Hex(input);
-    if (repo.embedding_input_hash === hash && repo.embedding) {
+    if (!shouldGenerateEmbedding(repo, provider, hash)) {
       result.repos_skipped_unchanged += 1;
       continue;
     }
@@ -198,17 +232,13 @@ export async function generateEmbeddingsBatch(options: {
   }
 
   for (const batch of chunk(workItems, EMBEDDING_BATCH_SIZE)) {
-    const response = await openai.embeddings.create({
-      model: EMBEDDING_MODEL,
-      input: batch.map((w) => w.input),
-      encoding_format: "float",
-    });
+    const embeddings = await provider.embed(batch.map((w) => w.input));
     result.batches += 1;
 
     // The API guarantees positional alignment between inputs and data[i].
-    if (response.data.length !== batch.length) {
+    if (embeddings.length !== batch.length) {
       throw new Error(
-        `Embedding API returned ${response.data.length} vectors for ${batch.length} inputs`,
+        `Embedding API returned ${embeddings.length} vectors for ${batch.length} inputs`,
       );
     }
 
@@ -216,7 +246,7 @@ export async function generateEmbeddingsBatch(options: {
     // because UPDATE on PK is cheap and writes are not the bottleneck.
     await Promise.all(
       batch.map(async (work, i) => {
-        const embedding = response.data[i].embedding;
+        const embedding = embeddings[i];
         if (embedding.length !== EMBEDDING_DIMENSIONS) {
           throw new Error(
             `Unexpected embedding dim ${embedding.length}, want ${EMBEDDING_DIMENSIONS}`,
@@ -227,8 +257,11 @@ export async function generateEmbeddingsBatch(options: {
           .update({
             embedding,
             embedding_input_hash: work.hash,
-            embedding_model: EMBEDDING_MODEL,
-            embedding_dim: EMBEDDING_DIMENSIONS,
+            embedding_provider: provider.name,
+            embedding_model: provider.model,
+            embedding_dim: provider.dimensions,
+            embedding_generated_at: new Date().toISOString(),
+            needs_embedding: false,
           })
           .eq("github_id", work.repo.github_id);
         if (updateError) throw updateError;

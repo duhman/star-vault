@@ -17,6 +17,8 @@ interface CliFlags {
   embeddingLimit?: number;
   contentConcurrency?: number;
   embeddingConcurrency?: number;
+  embeddingProvider?: string;
+  contentStaleDays?: number;
 }
 
 function parseNumberFlag(name: string, args: string[]): number | undefined {
@@ -37,12 +39,22 @@ function parseNumberFlag(name: string, args: string[]): number | undefined {
 
 function parseFlags(): CliFlags {
   const args = process.argv.slice(3);
+  const embeddingProviderInline = args.find((arg) =>
+    arg.startsWith("--embedding-provider="),
+  );
+  const embeddingProviderIndex = args.indexOf("--embedding-provider");
   return {
     maxPages: parseNumberFlag("--max-pages", args),
     contentLimit: parseNumberFlag("--content-limit", args),
     embeddingLimit: parseNumberFlag("--embedding-limit", args),
     contentConcurrency: parseNumberFlag("--concurrency-content", args),
     embeddingConcurrency: parseNumberFlag("--concurrency-embeddings", args),
+    embeddingProvider: embeddingProviderInline
+      ? embeddingProviderInline.split("=")[1]
+      : embeddingProviderIndex >= 0
+        ? args[embeddingProviderIndex + 1]
+        : undefined,
+    contentStaleDays: parseNumberFlag("--content-stale-days", args),
   };
 }
 
@@ -55,6 +67,8 @@ function getSyncOptions(base: SyncOptions, flags: CliFlags): SyncOptions {
     contentConcurrency: flags.contentConcurrency ?? base.contentConcurrency,
     embeddingConcurrency:
       flags.embeddingConcurrency ?? base.embeddingConcurrency,
+    embeddingProvider: flags.embeddingProvider ?? base.embeddingProvider,
+    contentStaleDays: flags.contentStaleDays ?? base.contentStaleDays,
   };
 }
 
@@ -264,6 +278,8 @@ Optional flags:
   --content-limit <n>            Override content batch size
   --embedding-limit <n>          Override embeddings batch size
   --concurrency-content <n>      Content fetch worker concurrency
-  --concurrency-embeddings <n>   Embeddings worker concurrency
+  --concurrency-embeddings <n>   Deprecated: embeddings are batched
+  --embedding-provider <name>    openai (default) or gemini
+  --content-stale-days <n>       Refresh content last checked >= n days ago
 `);
 }
