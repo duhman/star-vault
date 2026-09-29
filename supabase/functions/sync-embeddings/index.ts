@@ -1,16 +1,19 @@
 // Hourly batched embeddings tick. Reads up to EMBEDDING_BATCH_LIMIT repos
 // whose content is fetched but embedding is missing or whose
-// embedding_input_hash has drifted. One OpenAI API call per batch (~96 inputs).
+// embedding_input_hash has drifted. One OpenAI-compatible API call per batch
+// (~96 inputs).
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.47.0";
 import OpenAI from "https://esm.sh/openai@6.45.0";
 import {
   DEFAULT_EMBEDDING_PROVIDER,
+  DEFAULT_OPENROUTER_BASE_URL,
   EMBEDDING_BATCH_LIMIT,
   EMBEDDING_BATCH_SIZE,
   EMBEDDING_DIMENSIONS,
-  EMBEDDING_MODEL,
   GEMINI_EMBEDDING_MODEL,
+  OPENAI_EMBEDDING_MODEL,
+  OPENROUTER_EMBEDDING_MODEL,
   REPOS_TABLE,
   STAR_VAULT_SCHEMA,
   SYNC_RUNS_TABLE,
@@ -28,7 +31,7 @@ const cors = {
 };
 
 type EmbeddingProvider = {
-  name: "openai" | "gemini";
+  name: "openrouter" | "openai" | "gemini";
   model: string;
   embed(inputs: string[]): Promise<number[][]>;
 };
@@ -41,16 +44,37 @@ function normalizeVector(vector: number[]): number[] {
   return vector.map((value) => value / magnitude);
 }
 
-function normalizeEmbeddingProviderName(raw: string | null | undefined): "openai" | "gemini" {
+function normalizeEmbeddingProviderName(
+  raw: string | null | undefined,
+): "openrouter" | "openai" | "gemini" {
   const value = (raw ?? DEFAULT_EMBEDDING_PROVIDER).trim().toLowerCase();
-  if (value === "openai" || value === "gemini") return value;
-  throw new Error(`Unsupported EMBEDDING_PROVIDER "${raw}". Use "openai" or "gemini".`);
+  if (value === "openrouter" || value === "openai" || value === "gemini") {
+    return value;
+  }
+  throw new Error(
+    `Unsupported EMBEDDING_PROVIDER "${raw}". Use "openrouter", "openai", or "gemini".`,
+  );
+}
+
+function getConfiguredEmbeddingProviderName(env: {
+  EMBEDDING_PROVIDER?: string | null;
+  OPENROUTER_API_KEY?: string | null;
+  OPENAI_API_KEY?: string | null;
+}): "openrouter" | "openai" | "gemini" {
+  if (env.EMBEDDING_PROVIDER?.trim()) {
+    return normalizeEmbeddingProviderName(env.EMBEDDING_PROVIDER);
+  }
+  if (env.OPENROUTER_API_KEY?.trim()) return "openrouter";
+  if (env.OPENAI_API_KEY?.trim()) return "openai";
+  return normalizeEmbeddingProviderName(undefined);
 }
 
 function createEmbeddingProvider(
-  providerName: "openai" | "gemini",
+  providerName: "openrouter" | "openai" | "gemini",
+  openrouterKey: string | null,
   openaiKey: string | null,
   geminiKey: string | null,
+  openrouterBaseUrl: string,
 ): EmbeddingProvider | null {
   if (providerName === "gemini") {
     if (!geminiKey) return null;
@@ -86,20 +110,27 @@ function createEmbeddingProvider(
     };
   }
 
-  if (providerName === "openai") {
-    if (!openaiKey) return null;
+  if (providerName === "openrouter" || providerName === "openai") {
+    const apiKey = providerName === "openrouter" ? openrouterKey : openaiKey;
+    if (!apiKey) return null;
+    const model =
+      providerName === "openrouter"
+        ? OPENROUTER_EMBEDDING_MODEL
+        : OPENAI_EMBEDDING_MODEL;
     const openai = new OpenAI({
-      apiKey: openaiKey,
+      apiKey,
+      ...(providerName === "openrouter" ? { baseURL: openrouterBaseUrl } : {}),
       maxRetries: 5,
       timeout: 60_000,
     });
     return {
-      name: "openai",
-      model: EMBEDDING_MODEL,
+      name: providerName,
+      model,
       async embed(inputs: string[]) {
         const response = await openai.embeddings.create({
-          model: EMBEDDING_MODEL,
+          model,
           input: inputs,
+          dimensions: EMBEDDING_DIMENSIONS,
           encoding_format: "float",
         });
         return response.data.map((item) => normalizeVector(item.embedding));
@@ -115,11 +146,33 @@ Deno.serve(async (req) => {
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  const openrouterKey = Deno.env.get("OPENROUTER_API_KEY") || null;
   const openaiKey = Deno.env.get("OPENAI_API_KEY") || null;
-  const geminiKey = Deno.env.get("GOOGLE_API_KEY") || Deno.env.get("GEMINI_API_KEY") || null;
-  const providerName = normalizeEmbeddingProviderName(Deno.env.get("EMBEDDING_PROVIDER"));
-  const embeddingProvider = createEmbeddingProvider(providerName, openaiKey, geminiKey);
-  if (!embeddingProvider) return json({ error: providerName === "openai" ? "OPENAI_API_KEY required" : "GOOGLE_API_KEY or GEMINI_API_KEY required" }, 500);
+  const geminiKey =
+    Deno.env.get("GOOGLE_API_KEY") || Deno.env.get("GEMINI_API_KEY") || null;
+  const openrouterBaseUrl =
+    Deno.env.get("OPENROUTER_BASE_URL") || DEFAULT_OPENROUTER_BASE_URL;
+  const providerName = getConfiguredEmbeddingProviderName({
+    EMBEDDING_PROVIDER: Deno.env.get("EMBEDDING_PROVIDER"),
+    OPENROUTER_API_KEY: openrouterKey,
+    OPENAI_API_KEY: openaiKey,
+  });
+  const embeddingProvider = createEmbeddingProvider(
+    providerName,
+    openrouterKey,
+    openaiKey,
+    geminiKey,
+    openrouterBaseUrl,
+  );
+  if (!embeddingProvider) {
+    const error =
+      providerName === "openrouter"
+        ? "OPENROUTER_API_KEY required"
+        : providerName === "openai"
+          ? "OPENAI_API_KEY required"
+          : "GOOGLE_API_KEY or GEMINI_API_KEY required";
+    return json({ error }, 500);
+  }
 
   const supabase = createClient(supabaseUrl, supabaseKey, {
     db: { schema: STAR_VAULT_SCHEMA },

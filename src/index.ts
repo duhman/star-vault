@@ -279,7 +279,7 @@ Optional flags:
   --embedding-limit <n>          Override embeddings batch size
   --concurrency-content <n>      Content fetch worker concurrency
   --concurrency-embeddings <n>   Deprecated: embeddings are batched
-  --embedding-provider <name>    openai (default) or gemini
+  --embedding-provider <name>    openrouter (default), openai, or gemini
   --content-stale-days <n>       Refresh content last checked >= n days ago
 `);
 }

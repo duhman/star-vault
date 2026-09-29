@@ -19,3 +19,26 @@ test("0024 migration filters search by provider/model/dimension", async () => {
   expect(sql).toContain("needs_embedding");
   expect(sql).toContain("content_checked_at");
 });
+
+test("0025 migration makes OpenRouter the canonical provider", async () => {
+  const sql = await readFile(
+    resolve(
+      import.meta.dir,
+      "..",
+      "supabase/migrations/0025_openrouter_embedding_provider.sql",
+    ),
+    "utf8",
+  );
+
+  expect(sql).toContain("alter column embedding_provider set default 'openrouter'");
+  expect(sql).toContain(
+    "alter column embedding_model set default 'openai/text-embedding-3-small'",
+  );
+  expect(sql).toContain(
+    "check (embedding_provider in ('openrouter', 'openai', 'gemini'))",
+  );
+  expect(sql).toContain("embedding_provider_filter text default 'openrouter'");
+  expect(sql).toContain(
+    "embedding_model_filter text default 'openai/text-embedding-3-small'",
+  );
+});

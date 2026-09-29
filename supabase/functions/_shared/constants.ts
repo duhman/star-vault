@@ -4,8 +4,11 @@
 // handlers. Drift risk is flagged via shared types below + a typecheck in CI.
 
 export const STAR_VAULT_SCHEMA = "star_vault";
-export const DEFAULT_EMBEDDING_PROVIDER = "openai";
-export const EMBEDDING_MODEL = "text-embedding-3-small";
+export const DEFAULT_EMBEDDING_PROVIDER = "openrouter";
+export const OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
+export const OPENROUTER_EMBEDDING_MODEL = "openai/text-embedding-3-small";
+export const DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+export const EMBEDDING_MODEL = OPENROUTER_EMBEDDING_MODEL;
 export const GEMINI_EMBEDDING_MODEL = "gemini-embedding-001";
 export const EMBEDDING_DIMENSIONS = 1536;
 export const CONTENT_STALE_DAYS = 30;

@@ -35,8 +35,9 @@ generates embeddings, and exposes semantic search through CLI and MCP tools.
 
 - Runtime: Bun + TypeScript
 - Database: Supabase Postgres + pgvector
-- Embeddings: OpenAI `text-embedding-3-small` (1536-d) by default; Gemini
-  `gemini-embedding-001` can be enabled explicitly with `EMBEDDING_PROVIDER=gemini`
+- Embeddings: OpenRouter `openai/text-embedding-3-small` (1536-d) by default;
+  direct OpenAI `text-embedding-3-small` and Gemini `gemini-embedding-001` remain
+  explicit fallbacks
 - Canonical schema: `star_vault`
 - Canonical tables: `star_vault.repos`, `star_vault.sync_state`
 - Canonical RPC: `star_vault.search_repos`
@@ -46,7 +47,7 @@ generates embeddings, and exposes semantic search through CLI and MCP tools.
 - Bun 1.2+
 - Supabase project with pgvector extension
 - GitHub PAT with access to starred repos
-- OpenAI API key (for embeddings and semantic query embedding)
+- OpenRouter API key (for embeddings and semantic query embedding)
 
 ## Setup
 
@@ -60,12 +61,14 @@ Set required variables in `.env`:
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `GITHUB_TOKEN`
-- `OPENAI_API_KEY` when using the default OpenAI provider, or `GEMINI_API_KEY`
-  / `GOOGLE_API_KEY` when `EMBEDDING_PROVIDER=gemini`
+- `OPENROUTER_API_KEY` when using the default OpenRouter provider, or
+  `OPENAI_API_KEY` with `EMBEDDING_PROVIDER=openai`, or `GEMINI_API_KEY` /
+  `GOOGLE_API_KEY` with `EMBEDDING_PROVIDER=gemini`
 
 Optional:
 
-- `EMBEDDING_PROVIDER=openai|gemini` (defaults to `openai`)
+- `EMBEDDING_PROVIDER=openrouter|openai|gemini` (defaults to `openrouter`)
+- `OPENROUTER_BASE_URL` (defaults to `https://openrouter.ai/api/v1`)
 - `GEMINI_API_KEY` or `GOOGLE_API_KEY` when `EMBEDDING_PROVIDER=gemini`
 - `CONTENT_STALE_DAYS` (defaults to 30)
 
@@ -87,6 +90,7 @@ Apply migrations in order:
 12. `0022_remove_orphan_daily_cron.sql` — clean up legacy daily cron job
 13. `0023_invoke_edge_function_via_vault.sql` — read the service-role JWT from Supabase Vault (newer Supabase Cloud projects no longer allow `ALTER DATABASE ... SET` for `app.settings.*`)
 14. `0024_embedding_provider_and_freshness.sql` — explicit embedding provider metadata, stale content checks, and provider-filtered semantic search
+15. `0025_openrouter_embedding_provider.sql` — OpenRouter default, provider constraint, and retrieval defaults
 
 After migrations, store the service-role JWT in Vault (once, via `supabase db query` or the dashboard SQL editor):
 
@@ -108,6 +112,25 @@ throwaway insert/delete round-trip against `sync_runs` to verify grants.
 shape used by CLI and MCP. `0003` through `0013` are retained as historical
 placeholders; see `supabase/migrations/REPAIR.md` if a remote migration table
 needs to be reconciled.
+
+### OpenRouter rollout
+
+To keep Star Vault aligned with Tweet Vault, complete these steps together:
+
+1. Apply migration `0025_openrouter_embedding_provider.sql`.
+2. In the Supabase project’s protected secrets, set
+   `EMBEDDING_PROVIDER` to `openrouter` and provide `OPENROUTER_API_KEY`.
+   Keep the key out of shell history, source control, and chat transcripts.
+3. Deploy the updated `sync-embeddings` Edge Function.
+4. In the local, gitignored `.env`, set the same provider and key names.
+5. Run `bun run embeddings` until all fetched repos have
+   `openrouter/openai/text-embedding-3-small/1536` metadata and
+   `needs_embedding=false`.
+
+Verify the rollout with `bun run verify`, `bun run stats`, and a grouped
+read-only query over `embedding_provider`, `embedding_model`, `embedding_dim`,
+and `needs_embedding`. The hourly cron is only aligned after step 3; changing
+local `.env` alone does not change the deployed function.
 
 ## CLI Commands
 
@@ -146,7 +169,7 @@ bun run stats
 - `--embedding-limit <n>` override embedding batch size
 - `--concurrency-content <n>` content worker concurrency
 - `--concurrency-embeddings <n>` deprecated compatibility no-op; embeddings are batched
-- `--embedding-provider <openai|gemini>` override `EMBEDDING_PROVIDER`
+- `--embedding-provider <openrouter|openai|gemini>` override `EMBEDDING_PROVIDER`
 - `--content-stale-days <n>` override stale content window
 
 Examples:
@@ -190,7 +213,7 @@ MCP tools:
 `search_repos` accepts an optional `dependency` argument. When present, exact
 package.json dependency matches are prioritized ahead of semantic-only matches.
 Search and `find_similar` use the active embedding provider/model/dimension
-filter so OpenAI and Gemini vectors are not mixed.
+filter so OpenRouter, direct OpenAI, and Gemini vectors are not mixed.
 
 The server performs startup checks for canonical table and RPC availability and
 fails fast with actionable errors if schema drift is detected.

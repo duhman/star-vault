@@ -5,7 +5,7 @@
 Star Vault is a Supabase-only GitHub stars intelligence system.
 
 It imports starred repos from GitHub, fetches README/package metadata,
-generates OpenAI embeddings, and serves semantic retrieval through an MCP
+generates OpenRouter embeddings, and serves semantic retrieval through an MCP
 server.
 
 ## Canonical Runtime
@@ -15,7 +15,7 @@ server.
 - Schema: `star_vault`
 - Tables: `repos`, `sync_state`
 - Search RPC: `search_repos`
-- Embedding model: `text-embedding-3-small` (1536 dimensions)
+- Embedding model: OpenRouter `openai/text-embedding-3-small` (1536 dimensions)
 
 Legacy Convex artifacts have been removed and are no longer part of this
 repository.
@@ -68,6 +68,8 @@ Apply in order:
 11. `supabase/migrations/0021_delete_unseen_repos_rpc.sql` — NULL-safe RPC delete
 12. `supabase/migrations/0022_remove_orphan_daily_cron.sql` — drop pre-existing legacy job
 13. `supabase/migrations/0023_invoke_edge_function_via_vault.sql` — read service-role JWT from Vault (required on newer Supabase Cloud)
+14. `supabase/migrations/0024_embedding_provider_and_freshness.sql` — provider metadata and freshness state
+15. `supabase/migrations/0025_openrouter_embedding_provider.sql` — OpenRouter default and provider-aware search defaults
 
 The canonical reconciliation is in `0014`; `0015+` layer sync infrastructure
 (ETag cache, sync_run_id, embedding_input_hash, RLS) on top.
@@ -119,7 +121,7 @@ If MCP startup fails schema checks, re-apply `0014_reconcile_star_vault_canonica
 ## Troubleshooting
 
 - Missing env vars: ensure `.env` defines `SUPABASE_URL`,
-  `SUPABASE_SERVICE_ROLE_KEY`, `GITHUB_TOKEN`, `OPENAI_API_KEY`.
+  `SUPABASE_SERVICE_ROLE_KEY`, `GITHUB_TOKEN`, and `OPENROUTER_API_KEY`.
 - Repeated content fetches: candidates are now based on
   `content_fetched_at is null`; check data integrity if behavior regresses.
 - Search field drift: `search_repos` output contract is owned by migrations

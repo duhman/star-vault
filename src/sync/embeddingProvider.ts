@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import {
   DEFAULT_EMBEDDING_PROVIDER,
+  DEFAULT_OPENROUTER_BASE_URL,
   EMBEDDING_DIMENSIONS,
   EMBEDDING_PROVIDER_MODELS,
   type EmbeddingProviderName,
@@ -22,16 +23,23 @@ export function normalizeEmbeddingProviderName(
   raw: string | null | undefined,
 ): EmbeddingProviderName {
   const value = (raw ?? DEFAULT_EMBEDDING_PROVIDER).trim().toLowerCase();
-  if (value === "openai" || value === "gemini") return value;
+  if (value === "openrouter" || value === "openai" || value === "gemini") {
+    return value;
+  }
   throw new Error(
-    `Unsupported EMBEDDING_PROVIDER "${raw}". Use "openai" or "gemini".`,
+    `Unsupported EMBEDDING_PROVIDER "${raw}". Use "openrouter", "openai", or "gemini".`,
   );
 }
 
 export function getConfiguredEmbeddingProviderName(
   env: NodeJS.ProcessEnv = process.env,
 ): EmbeddingProviderName {
-  return normalizeEmbeddingProviderName(env.EMBEDDING_PROVIDER);
+  if (env.EMBEDDING_PROVIDER?.trim()) {
+    return normalizeEmbeddingProviderName(env.EMBEDDING_PROVIDER);
+  }
+  if (env.OPENROUTER_API_KEY?.trim()) return "openrouter";
+  if (env.OPENAI_API_KEY?.trim()) return "openai";
+  return normalizeEmbeddingProviderName(undefined);
 }
 
 export function getEmbeddingProviderModel(
@@ -108,10 +116,17 @@ export function createEmbeddingProvider(
   );
   const model = getEmbeddingProviderModel(name);
 
-  if (name === "openai") {
-    const apiKey = getRequiredKey(env, ["OPENAI_API_KEY"], name);
+  if (name === "openrouter" || name === "openai") {
+    const apiKey = getRequiredKey(
+      env,
+      name === "openrouter" ? ["OPENROUTER_API_KEY"] : ["OPENAI_API_KEY"],
+      name,
+    );
     const openai = new OpenAI({
       apiKey,
+      ...(name === "openrouter"
+        ? { baseURL: env.OPENROUTER_BASE_URL || DEFAULT_OPENROUTER_BASE_URL }
+        : {}),
       maxRetries: 5,
       timeout: 60_000,
     });
@@ -123,6 +138,7 @@ export function createEmbeddingProvider(
         const response = await openai.embeddings.create({
           model,
           input: inputs,
+          dimensions: EMBEDDING_DIMENSIONS,
           encoding_format: "float",
         });
         return response.data.map((item) => normalizeVector(item.embedding));
