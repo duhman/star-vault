@@ -1,24 +1,23 @@
 #!/bin/bash
-# Deploy the star-vault Edge Functions to a self-hosted Supabase.
+# Deploy the star-vault Edge Functions to a self-hosted Supabase over SSH
+# (scp + docker compose restart).
 #
-# If you're on Supabase cloud, prefer:
-#   supabase functions deploy sync-stars
-#   supabase functions deploy sync-content
-#   supabase functions deploy sync-embeddings
-#   supabase functions deploy sync-reconcile
+# star-vault itself runs on Supabase Cloud. Deploy there with:
+#   bun run deploy:cron
 #
-# This script handles the self-hosted case (scp + docker compose restart).
+# This script has no default host. The self-hosted instance it used to
+# target is retired, so SERVER must be set explicitly.
 #
 # Prereqs:
 # - SSH access to ${SERVER}
 # - Supabase running in Docker at ${REMOTE_SUPABASE_DIR}
 #
-# Usage: ./scripts/deploy-edge-function.sh
-#        ./scripts/deploy-edge-function.sh sync-stars   # deploy one
+# Usage: SERVER=supabase.example.com ./scripts/deploy-edge-function.sh
+#        SERVER=supabase.example.com ./scripts/deploy-edge-function.sh sync-stars   # deploy one
 
 set -euo pipefail
 
-SERVER="${SERVER:-srv1209224.hstgr.cloud}"
+: "${SERVER:?set SERVER to the SSH host of a self-hosted Supabase (there is no default host; for Supabase Cloud run: bun run deploy:cron)}"
 REMOTE_SUPABASE_DIR="${REMOTE_SUPABASE_DIR:-/root/supabase}"
 REMOTE_FUNCTIONS_DIR="${REMOTE_SUPABASE_DIR}/volumes/functions"
 
