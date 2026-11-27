@@ -12,8 +12,8 @@
 # - SSH access to ${SERVER}
 # - Supabase running in Docker at ${REMOTE_SUPABASE_DIR}
 #
-# Usage: SERVER=supabase.example.com ./scripts/deploy-edge-function.sh
-#        SERVER=supabase.example.com ./scripts/deploy-edge-function.sh sync-stars   # deploy one
+# Usage: SERVER=supabase.example.com bash scripts/deploy-edge-function.sh
+#        SERVER=supabase.example.com bash scripts/deploy-edge-function.sh sync-stars   # deploy one
 
 set -euo pipefail
 

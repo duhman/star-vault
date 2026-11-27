@@ -47,11 +47,16 @@ async function runDeploy(server: string | undefined) {
   return { exitCode, stderr, calls };
 }
 
-test("deploy script refuses to run without an explicit SERVER", async () => {
-  const { exitCode, stderr, calls } = await runDeploy(undefined);
+test.each([
+  ["unset", undefined],
+  ["empty", ""],
+])("deploy script refuses to run when SERVER is %s", async (_label, server) => {
+  const { exitCode, stderr, calls } = await runDeploy(server);
 
   expect(exitCode).not.toBe(0);
   expect(stderr).toContain("SERVER");
+  // The message has to say where Supabase Cloud deploys go instead.
+  expect(stderr).toContain("bun run deploy:cron");
   expect(calls).toBe("");
 });
 
@@ -68,4 +73,12 @@ test("deploy script names no retired host", async () => {
 
   expect(source).not.toContain("srv1209224");
   expect(source).not.toContain("hstgr.cloud");
+});
+
+// The file is not executable (mode 100644), so the usage line must go through bash.
+test("deploy script documents an invocation that works", async () => {
+  const source = await readFile(script, "utf8");
+
+  expect(source).toContain("bash scripts/deploy-edge-function.sh");
+  expect(source).not.toContain("./scripts/deploy-edge-function.sh");
 });
